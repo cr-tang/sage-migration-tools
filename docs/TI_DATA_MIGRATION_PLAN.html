@@ -161,7 +161,7 @@
 <body>
     <div class="container">
         <h1>Phoenix Flink TI Enrichment</h1>
-        <p class="subtitle">Data Migration Status | Last Updated: 2026-02-03 (Dependencies section added)</p>
+        <p class="subtitle">Data Migration Status | Last Updated: 2026-02-03</p>
 
         <!-- Executive Summary -->
         <h2>1. Executive Summary</h2>
@@ -242,12 +242,12 @@
                     </tr>
                     <tr>
                         <td><code>ioc_ips</code></td>
-                        <td>ioc_tokens + SINKHOLE_IDENTIFIERS</td>
-                        <td>~3,500</td>
-                        <td><span class="status-progress">Ready</span></td>
-                        <td>sinkhole_importer.py created</td>
+                        <td>TOKENS (IPv4 entries only)</td>
+                        <td>~50</td>
+                        <td><span class="status-done">Done</span></td>
+                        <td>Via TOKENS import</td>
                         <td>—</td>
-                        <td>Manually maintained<br><code>Sage: /download_v1/sinkhole_identifiers</code></td>
+                        <td>Manually maintained via TOKENS<br><small>Note: SINKHOLED IPs not imported (not treated as blacklisted)</small></td>
                     </tr>
                     <tr>
                         <td><code>file_extension_classification</code></td>
@@ -391,14 +391,14 @@
                         <td>Shard processing</td>
                     </tr>
                     <tr>
-                        <td>Import SINKHOLE_IDENTIFIERS to ioc_ips</td>
-                        <td><span class="risk-medium">Medium</span></td>
-                        <td>-</td>
+                        <td><s>Import SINKHOLE_IDENTIFIERS to ioc_ips</s></td>
+                        <td><span class="risk-low">N/A</span></td>
+                        <td>Not needed - SINKHOLED IPs not treated as blacklisted</td>
                     </tr>
                     <tr>
-                        <td>Extract IP entries from ioc_tokens to ioc_ips</td>
-                        <td><span class="risk-medium">Medium</span></td>
-                        <td>-</td>
+                        <td>IP entries from TOKENS</td>
+                        <td><span class="status-done">Done</span></td>
+                        <td>Imported via TOKENS migration</td>
                     </tr>
                     <tr>
                         <td>Domain processing script</td>
@@ -441,74 +441,24 @@
             </table>
         </div>
 
-        <!-- Data Source Dependencies -->
-        <h2>7. Data Source Dependencies</h2>
-        
-        <div class="card">
-            <p>Key findings from Sage code analysis (confirmed 2026-02-03):</p>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Data Type</th>
-                        <th>External Dependencies</th>
-                        <th>Update Strategy for Phoenix</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>File Hash</strong></td>
-                        <td>
-                            VT Feeder (GCS) as primary source<br>
-                            Broccoli ML for classification<br>
-                            VT API as fallback
-                        </td>
-                        <td>GCS Feeder access + Broccoli re-classification</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Domain</strong></td>
-                        <td>
-                            VT API direct calls only<br>
-                            <em>No GCS cache, No Broccoli</em>
-                        </td>
-                        <td>VT API real-time query + TiDB cache</td>
-                    </tr>
-                    <tr>
-                        <td><strong>IP</strong></td>
-                        <td>
-                            Internal data only<br>
-                            <em>No VT API, No external service</em>
-                        </td>
-                        <td>Static data, manual updates via Upload Service</td>
-                    </tr>
-                </tbody>
-            </table>
-            
-            <div class="highlight-box" style="margin-top: 1rem;">
-                <strong>Key Insight:</strong> Domain classification is simpler than File Hash - it uses rule-based logic on VT API response (responseCode, resolutions, whois) without ML processing. This means Phoenix can directly call VT Domain API for fresh data without Broccoli dependency.
-            </div>
-        </div>
-
         <!-- Open Questions -->
-        <h2>8. Open Questions</h2>
+        <h2>7. Open Questions</h2>
         
         <div class="card">
-            <h3>Resolved</h3>
             <ul>
-                <li><strong style="color: var(--success-color);">✓ Domain update strategy:</strong> Since Domain doesn't depend on Broccoli or GCS Feeder, Phoenix can directly call VT Domain API for real-time classification and cache results in TiDB.</li>
-                <li><strong style="color: var(--success-color);">✓ IP data source:</strong> Confirmed via code analysis - Sage IP classification uses only internal data (SINKHOLE_IDENTIFIERS + TOKENS). No VT API involved.</li>
-            </ul>
-            
-            <h3>Open</h3>
-            <ul>
-                <li><strong>File Hash freshness:</strong> Need to set up GCS Feeder access from Phoenix for post-2020 file hash data.</li>
-                <li><strong>VT API quota:</strong> Evaluate VT API rate limits and costs for Domain real-time queries.</li>
-                <li><strong>Domain data volume:</strong> Need to estimate filtered output size for domain_classification (446 GB raw).</li>
-                <li><strong>URL data:</strong> Currently not planned - stored in BigQuery, low query volume.</li>
+                <li><strong>Data freshness:</strong> MongoDB snapshot is from 2020-11-05. How to handle updates for data after this date?
+                    <ul>
+                        <li>Option A: Direct VT Feeder GCS access from Phoenix</li>
+                        <li>Option B: Periodic sync job</li>
+                    </ul>
+                </li>
+                <li><strong>Domain data volume:</strong> Need to estimate filtered output size for domain_classification (446 GB raw)</li>
+                <li><strong>URL data:</strong> Currently not planned - stored in BigQuery, low query volume</li>
             </ul>
         </div>
 
         <!-- Related Documents -->
-        <h2>9. Related Documents</h2>
+        <h2>8. Related Documents</h2>
         
         <div class="card">
             <ul>
@@ -804,7 +754,8 @@
 │   Status: ✅ DONE                                                               │
 │                                                                                 │
 │   • ~2,500 records imported to ioc_tokens                                      │
-│   • IP entries will also be copied to ioc_ips                                  │
+│   • IP entries (type=IPv4) used for ioc_ips lookups                           │
+│   • Note: SINKHOLE_IDENTIFIERS NOT imported (not treated as blacklisted)      │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘</pre>
         </div>
@@ -840,9 +791,9 @@
                     <tr>
                         <td><strong>IP</strong></td>
                         <td>— (Internal only)</td>
-                        <td>MongoDB SINKHOLE + TOKENS</td>
+                        <td>TOKENS only (IPv4 entries)</td>
                         <td>TiDB ioc_ips</td>
-                        <td><span class="status-blocked">Blocked</span></td>
+                        <td><span class="status-done">Done</span></td>
                     </tr>
                     <tr>
                         <td><strong>URL</strong></td>
