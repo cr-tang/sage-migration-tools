@@ -17,14 +17,9 @@ For small static datasets (< 10,000 records), use SQL seed files instead of Pyth
 ```bash
 cd ~/work/sage-migration-tools/scripts
 
-# From GCS
+# Use local BSON from samples/bson/
 python3 generate_sinkhole_seed.py \
-  --input gs://sage_prod_dump/r02/cybereason/SINKHOLE_IDENTIFIERS.bson \
-  --output sinkhole_identifiers_seed.sql
-
-# From local file
-python3 generate_sinkhole_seed.py \
-  --input SINKHOLE_IDENTIFIERS.bson \
+  --input ../samples/bson/SINKHOLE_IDENTIFIERS.bson \
   --output sinkhole_identifiers_seed.sql
 ```
 
