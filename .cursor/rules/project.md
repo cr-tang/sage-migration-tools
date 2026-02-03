@@ -52,7 +52,9 @@ gs://sage_prod_dump/
 
 ## Related Repositories
 
-- **phoenix-flink**: Flink jobs with TI enrichment (ThreatIntelService, TidbStorage)
-- **Phoenix**: Main monorepo with TiDB migrations
-- **sage-content-provider**: Original Sage service (MongoDB, VT integration)
-- **vt-feeder-suite**: VirusTotal Feed API integration
+| Repo | Purpose | Key Files |
+|------|---------|-----------|
+| **phoenix-flink** | Flink TI enrichment | `ThreatIntelService.kt`, `TidbStorage.kt`, `Classification.kt` |
+| **Phoenix** | TiDB migrations | `migrations/mysql/up/*.sql`, `migrate-ti.sh` |
+| **sage-content-provider** | Original Sage service | MongoDB, VT integration |
+| **vt-feeder-suite** | VT Feed API | GCS storage logic |
