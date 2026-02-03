@@ -1,181 +1,261 @@
-# parallel_bson_processor.py User Guide
+# Sage Migration Tools - Usage Guide
 
-## Start
+This guide covers all scripts in the sage-migration-tools repository.
 
-### Process All Shards (Default)
+## Table of Contents
+
+1. [parallel_bson_processor.py](#parallel_bson_processorpy) - Process file_rep BSON dumps
+2. [domain_bson_processor.py](#domain_bson_processorpy) - Process domain_classification BSON dumps
+3. [sinkhole_importer.py](#sinkhole_importerpy) - Import SINKHOLE_IDENTIFIERS to TiDB
+4. [tidb_importer.py](#tidb_importerpy) - Import NDJSON to TiDB
+5. [tokens_importer.py](#tokens_importerpy) - Import TOKENS collection
+
+---
+
+## parallel_bson_processor.py
+
+Processes MongoDB `file_rep` BSON dumps from GCS, extracts threat records, and outputs compressed NDJSON files.
+
+### Quick Start
+
 ```bash
-python3 parallel_bson_processor.py
-```
-
-### Process Single Shard (For Testing)
-```bash
-# Process only r01 shard
+# Process a single shard
 python3 parallel_bson_processor.py --shard r01
 
-# Process only r02 shard
-python3 parallel_bson_processor.py --shard r02
-```
+# Process all shards
+python3 parallel_bson_processor.py
 
-### Resume After Interruption
-```bash
-# Resume all shards
-python3 parallel_bson_processor.py --resume
-
-# Resume specific shard
+# Resume after interruption
 python3 parallel_bson_processor.py --shard r01 --resume
 ```
 
-## Run on VM (Background)
+### Custom Input/Output
 
-### Method 1: Using nohup (Recommended - Works without tmux)
-
-#### 1. SSH to VM
 ```bash
-ssh -i ~/path/to/ppem.pem centos@34.26.16.84
-cd /path/to/scripts/parallel-bson-processor
+python3 parallel_bson_processor.py \
+  --input-file gs://sage_prod_dump/r01/cybereason/file_rep.bson \
+  --output-file file_rep_r01_full.ndjson.gz \
+  --log-file bson_processor_r01.log \
+  --workers 40
 ```
 
-#### 2. Run with nohup
+### Output
+
+- `file_rep_{shard}_full.ndjson.gz` - Compressed NDJSON with threat records
+- `file_rep_{shard}_full.ndjson.gz.checkpoint` - Resume checkpoint
+
+### Filtering Logic
+
+- **SKIP**: `response_code == 0` (VT has no data)
+- **SKIP**: `classification == 'indifferent'` or `'unknown'` (neutral)
+- **KEEP**: Valid threat classification (malware, ransomware, etc.)
+- **KEEP**: `positives > 0` (AV detections even without classification)
+
+---
+
+## domain_bson_processor.py
+
+Processes MongoDB `domain_classification` BSON dumps from GCS.
+
+### Quick Start
+
 ```bash
-nohup python3 parallel_bson_processor.py > output.log 2>&1 &
+# Process a single shard
+python3 domain_bson_processor.py --shard r01
+
+# Resume after interruption
+python3 domain_bson_processor.py --shard r01 --resume
 ```
 
-#### 3. Check Process
-```bash
-# View process ID
-ps aux | grep parallel_bson_processor
+### Custom Input/Output
 
-# View real-time logs
+```bash
+python3 domain_bson_processor.py \
+  --input-file gs://sage_prod_dump/r01/cybereason/domain_classification.bson \
+  --output-file domain_classification_r01.ndjson.gz \
+  --log-file domain_processor_r01.log \
+  --workers 20
+```
+
+### Output
+
+- `domain_classification_{shard}.ndjson.gz` - Compressed NDJSON with domain records
+- `domain_classification_{shard}.ndjson.gz.checkpoint` - Resume checkpoint
+
+### Filtering Logic
+
+- **SKIP**: `maliciousClassification=unknown` (VT has no data)
+- **SKIP**: `maliciousClassification=indifferent` (neutral, unless has detectedUrls)
+- **KEEP**: Malicious classification (malware, whitelist, etc.)
+- **KEEP**: Has `detectedUrls` with `positives > 0`
+
+---
+
+## sinkhole_importer.py
+
+Imports SINKHOLE_IDENTIFIERS and TOKENS IP entries to TiDB `ioc_ips` table.
+
+### Quick Start
+
+```bash
+# Import from GCS
+python3 sinkhole_importer.py \
+  --sinkhole-file gs://sage_prod_dump/r02/cybereason/SINKHOLE_IDENTIFIERS.bson \
+  --host tidb-stg-ap-tokyo-1.cybereason.net \
+  --port 4000 \
+  --password 'your_password'
+
+# Also import TOKENS IP entries
+python3 sinkhole_importer.py \
+  --sinkhole-file gs://sage_prod_dump/r02/cybereason/SINKHOLE_IDENTIFIERS.bson \
+  --include-tokens \
+  --host tidb-stg-ap-tokyo-1.cybereason.net \
+  --port 4000
+
+# Dry run (no database writes)
+python3 sinkhole_importer.py \
+  --sinkhole-file SINKHOLE_IDENTIFIERS.bson \
+  --dry-run
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--sinkhole-file` | Path to SINKHOLE_IDENTIFIERS.bson (local or gs://) |
+| `--include-tokens` | Also import IP entries from ioc_tokens table |
+| `--host` | TiDB host (default: localhost) |
+| `--port` | TiDB port (default: 4000) |
+| `--user` | TiDB user (default: root) |
+| `--password` | TiDB password |
+| `--database` | Database name (default: threat_intel) |
+| `--dry-run` | Parse data but don't write to database |
+
+---
+
+## tidb_importer.py
+
+Imports processed NDJSON files to TiDB tables.
+
+### Quick Start
+
+```bash
+python3 tidb_importer.py \
+  --input-file file_rep_r01_full.ndjson.gz \
+  --host tidb-stg-ap-tokyo-1.cybereason.net \
+  --port 4000 \
+  --database threat_intel \
+  --table ioc_file_hashes
+```
+
+---
+
+## tokens_importer.py
+
+Imports TOKENS collection to TiDB `ioc_tokens` table.
+
+### Quick Start
+
+```bash
+python3 tokens_importer.py \
+  --tokens-file gs://sage_prod_dump/r01/cybereason/TOKENS.bson \
+  --host tidb-stg-ap-tokyo-1.cybereason.net \
+  --port 4000
+```
+
+---
+
+## Running on VM (Background)
+
+### Method 1: Using nohup (Works without tmux)
+
+```bash
+# SSH to VM
+ssh -i ~/path/to/key.pem centos@phoenix-vt-feeder
+
+# Run with nohup
+cd /path/to/scripts
+nohup python3 parallel_bson_processor.py --shard r01 > output.log 2>&1 &
+
+# Check progress
 tail -f output.log
-```
-
-#### 4. Stop Script
-```bash
-# Find process ID
 ps aux | grep parallel_bson_processor
 
-# Graceful stop (will save checkpoint)
+# Stop gracefully
 kill <PID>
-
-# Or force kill (not recommended)
-kill -9 <PID>
 ```
 
-### Method 2: Using tmux (Requires Installation)
+### Method 2: Using tmux
 
-**Install tmux first (if not available):**
 ```bash
-# On CentOS/RHEL
-sudo yum install -y tmux
-
-# On Ubuntu/Debian
-sudo apt-get install -y tmux
-```
-
-#### 1. SSH to VM
-```bash
-ssh -i ~/path/to/ppem.pem centos@34.26.16.84
-cd /path/to/scripts/parallel-bson-processor
-```
-
-#### 2. Create tmux Session
-```bash
+# Create session
 tmux new -s bson_processor
-```
-This will create a new tmux session and you'll be inside it.
 
-#### 3. Run Script in tmux
-Inside the tmux session, run:
-```bash
-cd /path/to/scripts/parallel-bson-processor
-python3 parallel_bson_processor.py
-```
-**Note:** You can see real-time logs directly in the tmux window.
+# Run script
+python3 parallel_bson_processor.py --shard r01
 
-#### 4. Detach (Run in Background)
-```
-Press Ctrl+B, then press D
-```
-Now you can safely close SSH connection, script will continue running.
+# Detach: Ctrl+B, then D
+# Reattach: tmux attach -t bson_processor
 
-#### 5. Reconnect to View Progress/Logs
-```bash
-tmux attach -t bson_processor
-```
-This will reconnect to the tmux session and you'll see the current output/logs.
-
-#### 6. Stop Script
-Inside tmux session:
-```
-Press Ctrl+C (will save checkpoint)
-Then type exit
+# Stop: Ctrl+C (saves checkpoint)
 ```
 
-#### View Logs in tmux
-- **Scroll up**: Press `Ctrl+B` then `[` to enter scroll mode, use arrow keys to scroll, press `q` to exit
-- **Reattach anytime**: `tmux attach -t bson_processor` to see current output
-
-## Output Files
-
-Output files are saved in the **current working directory** where you run the script.
-
-**Example:** If you run the script from `/root/`, files will be saved as:
-- `/root/file_rep_r01.ndjson.gz` ~ `/root/file_rep_r06.ndjson.gz` (6 output files)
-- `/root/file_rep_r01.ndjson.gz.checkpoint` ~ `/root/file_rep_r06.ndjson.gz.checkpoint` (checkpoint files)
-
-**To save files in a specific directory:**
-```bash
-cd /path/to/output/directory
-python3 parallel_bson_processor.py
-```
+---
 
 ## Check Progress
 
 ```bash
 # View checkpoint
-cat file_rep_r01.ndjson.gz.checkpoint
+cat file_rep_r01_full.ndjson.gz.checkpoint
 
 # View output file sizes
-ls -lh file_rep_*.ndjson.gz
+ls -lh *.ndjson.gz
 
-# View number of processed records
-zcat file_rep_r01.ndjson.gz | wc -l
+# Count processed records
+zcat file_rep_r01_full.ndjson.gz | wc -l
 ```
 
-## Useful Commands
-
-### tmux Commands
-```bash
-tmux ls                              # List all sessions
-tmux attach -t bson_processor        # Attach to session
-tmux kill-session -t bson_processor  # Kill session
-```
-
-### Process Management
-```bash
-ps aux | grep parallel_bson_processor  # Find process
-kill <PID>                              # Stop process gracefully
-tail -f output.log                      # View logs (if using nohup)
-```
+---
 
 ## Performance & Memory
 
-### Current Configuration
-- **Chunk size**: 400MB (larger chunks reduce HTTP overhead, better network utilization)
-- **Concurrent workers**: 32 (processes 32 ranges simultaneously for maximum network throughput)
-- **Total workers**: 32-48 (auto-calculated based on file size)
-- **Peak memory**: ~19GB (safe for 32GB VM, actual usage typically lower)
-- **Batch writing**: 8MB byte-based batching for better I/O performance
+### File Hash Processor (parallel_bson_processor.py)
+- **Chunk size**: 400MB
+- **Workers**: 32-40
+- **Peak memory**: ~19GB
+- **Processing time**: ~5 hours per shard (950GB)
 
-### Expected Performance
-- **Processing time**: ~1-1.5 hours per shard (for 950GB file, optimized based on low memory usage)
-- **Memory usage**: ~16GB peak (well within 32GB VM limits, actual usage typically much lower)
-- **Network**: Aggressively optimized for GCS download speed (memory is not a constraint)
+### Domain Processor (domain_bson_processor.py)
+- **Chunk size**: 256MB
+- **Workers**: 20
+- **Processing time**: ~1-2 hours per shard (80GB)
 
-## Notes
+---
 
-1. **GCS Authentication**: Ensure configured with `gcloud auth application-default login`
-2. **Disk Space**: Each shard output is ~100-300GB, ensure sufficient space
-3. **Resume**: Use `--resume` to continue, automatically skips completed workers
-4. **Memory**: Script uses chunked download (400MB chunks) to optimize network efficiency while staying within memory limits
-5. **Performance**: Optimized for network throughput (GCS download is the bottleneck, not CPU/memory)
+## Prerequisites
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Required packages:
+# - bson (pymongo)
+# - orjson
+# - google-cloud-storage
+# - mysql-connector-python
+
+# GCS Authentication
+gcloud auth application-default login
+```
+
+---
+
+## TiDB Connection Info
+
+| Environment | Host | Port |
+|-------------|------|------|
+| Dev | tidb-dev-us-ashburn-1.cybereason.net | 4000 |
+| Stage | tidb-stg-ap-tokyo-1.cybereason.net | 4000 |
+| Prod | tidb-prod-ap-tokyo-1.cybereason.net | 4000 |
+
+Database: `threat_intel`
