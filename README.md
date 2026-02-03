@@ -106,9 +106,10 @@ python3 tidb_importer.py \
 |--------|--------------|------|--------------|
 | file_rep | `gs://sage_prod_dump/r01-r06/cybereason/file_rep.bson` | 5.6 TB | `ioc_file_hashes` |
 | domain_classification | `gs://sage_prod_dump/r01-r06/cybereason/domain_classification.bson` | 446 GB | `ioc_domains` |
-| SINKHOLE_IDENTIFIERS | `gs://sage_prod_dump/r02/cybereason/SINKHOLE_IDENTIFIERS.bson` | 456 KB | `ioc_ips` |
-| TOKENS | `gs://sage_prod_dump/r01/cybereason/TOKENS.bson` | 890 KB | `ioc_tokens` |
+| TOKENS | `gs://sage_prod_dump/r01/cybereason/TOKENS.bson` | 890 KB | `ioc_tokens`, `ioc_ips` |
 | FILE_EXTENSION_CLASSIFICATION | `gs://sage_prod_dump/r04/cybereason/FILE_EXTENSION_CLASSIFICATION.bson` | 105 KB | `file_extension_classification` |
+
+**Note**: SINKHOLE_IDENTIFIERS is NOT imported - SINKHOLED IPs are not treated as blacklisted per rule team.
 
 ## TiDB Target Tables
 
@@ -116,7 +117,7 @@ python3 tidb_importer.py \
 |-------|---------|--------|
 | `ioc_file_hashes` | File hash reputation (SHA1, MD5, SHA256) | file_rep + TOKENS |
 | `ioc_domains` | Domain reputation | domain_classification + TOKENS |
-| `ioc_ips` | IP reputation (sinkhole + malicious) | SINKHOLE_IDENTIFIERS + TOKENS |
+| `ioc_ips` | IP reputation (malicious only) | TOKENS (IP entries) |
 | `ioc_tokens` | Internal curated threat intel | TOKENS |
 | `file_extension_classification` | Extension type for double-extension detection | FILE_EXTENSION_CLASSIFICATION |
 | `customer_ioc` | Customer-specific blocklist/whitelist | Phoenix Portal API |

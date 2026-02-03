@@ -45,10 +45,12 @@ gs://sage_prod_dump/
 |-------|--------|--------|
 | `ioc_file_hashes` | file_rep | In Progress |
 | `ioc_domains` | domain_classification | Ready |
-| `ioc_ips` | SINKHOLE + TOKENS | Ready |
+| `ioc_ips` | TOKENS (IP entries only) | Done via TOKENS |
 | `ioc_tokens` | TOKENS | Done |
 | `file_extension_classification` | FILE_EXTENSION_CLASSIFICATION | Done |
 | `customer_ioc` | Phoenix Portal | Done |
+
+**Note**: SINKHOLED IPs are NOT treated as blacklisted (per rule team), so we don't import SINKHOLE_IDENTIFIERS.
 
 ## Related Repositories
 

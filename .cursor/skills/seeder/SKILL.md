@@ -4,36 +4,14 @@ For small static datasets (< 10,000 records), use SQL seed files instead of Pyth
 
 ## When to Use Seeder
 
-| Data | Size | Approach |
-|------|------|----------|
-| SINKHOLE_IDENTIFIERS | ~3,000 | Seed file |
-| TOKENS | ~2,500 | Seed file (done) |
-| FILE_EXTENSION_CLASSIFICATION | ~337 | Seed file (done) |
-| file_rep | ~1M+ | Python processor |
-| domain_classification | ~50M+ | Python processor |
+| Data | Size | Approach | Status |
+|------|------|----------|--------|
+| TOKENS | ~2,500 | Seed file | Done |
+| FILE_EXTENSION_CLASSIFICATION | ~337 | Seed file | Done |
+| file_rep | ~1M+ | Python processor | In Progress |
+| domain_classification | ~50M+ | Python processor | Pending |
 
-## Generate Sinkhole Seed File
-
-```bash
-cd ~/work/sage-migration-tools/scripts
-
-# Use local BSON from samples/bson/
-python3 generate_sinkhole_seed.py \
-  --input ../samples/bson/SINKHOLE_IDENTIFIERS.bson \
-  --output sinkhole_identifiers_seed.sql
-```
-
-## Deploy Seed File
-
-```bash
-# 1. Copy to Phoenix repo
-cp sinkhole_identifiers_seed.sql \
-  ~/work/Phoenix/migrations/mysql/seed/data/20260130000000_sinkhole_identifiers.sql
-
-# 2. Run seeder
-cd ~/work/Phoenix
-./scripts/migrate-ti.sh seed
-```
+**Note**: SINKHOLE_IDENTIFIERS is NOT imported - SINKHOLED IPs are not treated as blacklisted per rule team.
 
 ## Seed File Location in Phoenix
 
@@ -44,8 +22,7 @@ Phoenix/
         └── seed/
             ├── seeder.sql                # Main seeder (test data)
             └── data/
-                ├── 20260121134500_file_extension_classification.sql
-                └── 20260130000000_sinkhole_identifiers.sql  # New
+                └── 20260121134500_file_extension_classification.sql
 ```
 
 ## Benefits of Seeder Approach
@@ -54,3 +31,8 @@ Phoenix/
 2. **Reproducible** - Every environment gets same data
 3. **Simple deployment** - Just run `migrate-ti.sh seed`
 4. **No runtime dependencies** - No Python/GCS needed at deploy time
+
+## IP Data
+
+IP data comes from **TOKENS** collection only (entries with type="IPv4").
+These are imported via `tokens_importer.py` to both `ioc_tokens` and used for IP lookups.
