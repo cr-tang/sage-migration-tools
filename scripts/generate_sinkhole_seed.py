@@ -64,28 +64,57 @@ def read_bson_file(file_path: str) -> List[dict]:
     return records
 
 
+def is_valid_ip(s: str) -> bool:
+    """Check if string is a valid IPv4 or IPv6 address."""
+    import socket
+    # Try IPv4
+    try:
+        socket.inet_pton(socket.AF_INET, s)
+        return True
+    except socket.error:
+        pass
+    # Try IPv6
+    try:
+        socket.inet_pton(socket.AF_INET6, s)
+        return True
+    except socket.error:
+        pass
+    return False
+
+
 def parse_sinkhole_records(records: List[dict]) -> List[Tuple[str, str]]:
-    """Parse SINKHOLE_IDENTIFIERS records to (ip, entity) tuples."""
+    """Parse SINKHOLE_IDENTIFIERS records to (ip, entity) tuples.
+    
+    Note: SINKHOLE_IDENTIFIERS contains both IPs and domains.
+    - Domains are used by Sage to match reverse domains and name servers
+    - IPs are used to match resolved IP addresses
+    
+    We only extract valid IP addresses for ioc_ips table.
+    """
     results = []
+    skipped_domains = 0
+    
     for record in records:
         try:
             _id = record.get('_id', {})
-            ip = _id.get('identifier', '') if isinstance(_id, dict) else str(_id)
+            identifier = _id.get('identifier', '') if isinstance(_id, dict) else str(_id)
             
-            if not ip:
+            if not identifier:
+                continue
+            
+            # Only keep valid IP addresses, skip domains
+            if not is_valid_ip(identifier):
+                skipped_domains += 1
                 continue
             
             value = record.get('value', {})
             entity = value.get('entity', '') if isinstance(value, dict) else ''
             
-            # Validate IP format (basic check)
-            if '.' not in ip and ':' not in ip:
-                continue
-            
-            results.append((ip, entity))
+            results.append((identifier, entity))
         except Exception as e:
             print(f"Warning: Error parsing record: {e}")
     
+    print(f"Extracted {len(results)} IPs, skipped {skipped_domains} domains")
     return results
 
 
