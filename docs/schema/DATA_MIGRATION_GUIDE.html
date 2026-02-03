@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Sage Data Migration Guide</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1100px; margin: 0 auto; padding: 20px; line-height: 1.6; }
+        h1 { color: #172B4D; border-bottom: 2px solid #0052CC; padding-bottom: 10px; }
+        h2 { color: #172B4D; margin-top: 30px; border-left: 4px solid #0052CC; padding-left: 12px; }
+        h3 { color: #42526E; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+        th, td { border: 1px solid #DFE1E6; padding: 10px 12px; text-align: left; }
+        th { background-color: #F4F5F7; color: #172B4D; font-weight: 600; }
+        tr:nth-child(even) { background-color: #FAFBFC; }
+        code { background-color: #F4F5F7; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, monospace; font-size: 13px; }
+        pre { background-color: #1E1E1E; color: #D4D4D4; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; }
+        .info-box { background-color: #DEEBFF; border-left: 4px solid #0052CC; padding: 15px; margin: 15px 0; }
+        .warning-box { background-color: #FFFAE6; border-left: 4px solid #FF8B00; padding: 15px; margin: 15px 0; }
+        .success-box { background-color: #E3FCEF; border-left: 4px solid #00875A; padding: 15px; margin: 15px 0; }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 12px; margin-right: 5px; }
+        .tag-mongo { background-color: #00684A; color: white; }
+        .tag-gcs { background-color: #4285F4; color: white; }
+        .tag-api { background-color: #FF6B00; color: white; }
+    </style>
+</head>
+<body>
+
+<h1>🚀 Sage Data Migration Guide</h1>
+
+<p>This guide explains how to extract data from each Sage data source for migration to Phoenix or another system.</p>
+
+<div class="info-box">
+    <strong>Key Insight:</strong> Sage data is stored in two places:
+    <ul>
+        <li><strong>MongoDB</strong> - Cached classification results and internal data</li>
+        <li><strong>GCS (Google Cloud Storage)</strong> - VT Feeder raw reports</li>
+    </ul>
+</div>
+
+<h2>1. Data Sources Overview</h2>
+
+<table>
+    <tr>
+        <th>Data Source</th>
+        <th>Storage</th>
+        <th>Collection/Bucket</th>
+        <th>Data Type</th>
+        <th>Estimated Size</th>
+    </tr>
+    <tr>
+        <td><strong>VirusTotal File</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span> <span class="tag tag-gcs">GCS</span></td>
+        <td><code>file_rep</code> / <code>gs://vt-file-feeder</code></td>
+        <td>File classification + raw VT reports</td>
+        <td>~100GB+</td>
+    </tr>
+    <tr>
+        <td><strong>VirusTotal Domain</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>domain_classification</code></td>
+        <td>Domain classification</td>
+        <td>~10GB</td>
+    </tr>
+    <tr>
+        <td><strong>Reversing Labs</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>file_rep_revlabs</code></td>
+        <td>File classification</td>
+        <td>~5GB</td>
+    </tr>
+    <tr>
+        <td><strong>OPSWAT</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>file_rep_opswat</code></td>
+        <td>File classification</td>
+        <td>~5GB</td>
+    </tr>
+    <tr>
+        <td><strong>Token Library</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>TOKENS</code></td>
+        <td>Curated hash/domain/IP list</td>
+        <td>~500MB</td>
+    </tr>
+    <tr>
+        <td><strong>DNS Resolution</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>domain_dns</code></td>
+        <td>DNS lookup results</td>
+        <td>~2GB</td>
+    </tr>
+    <tr>
+        <td><strong>Customer Blocklist</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>file_classification_sage_customer</code><br><code>domain_classification_sage_customer</code><br><code>ip_classification_sage_customer</code></td>
+        <td>Customer-defined lists</td>
+        <td>Per customer</td>
+    </tr>
+    <tr>
+        <td><strong>AV Reports</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>av_classification</code></td>
+        <td>Sensor AV reports</td>
+        <td>~1GB</td>
+    </tr>
+    <tr>
+        <td><strong>TAXII Feeds</strong></td>
+        <td><span class="tag tag-mongo">MongoDB</span></td>
+        <td><code>threat_feed</code> (capped)</td>
+        <td>Threat intel indicators</td>
+        <td>Configurable</td>
+    </tr>
+</table>
+
+<h2>2. Data Sources by Classification Type</h2>
+
+<div class="info-box">
+    <strong>Key Insight:</strong> Different classification types use different data sources!
+</div>
+
+<table>
+    <tr>
+        <th>Data Source</th>
+        <th>File Classification</th>
+        <th>Domain Classification</th>
+        <th>IP Classification</th>
+    </tr>
+    <tr>
+        <td><strong>VirusTotal (VT Feeder)</strong></td>
+        <td>✅ Primary</td>
+        <td>✅ Primary</td>
+        <td>❌ Not used</td>
+    </tr>
+    <tr>
+        <td><strong>Reversing Labs</strong></td>
+        <td>✅ Secondary</td>
+        <td>❌</td>
+        <td>❌</td>
+    </tr>
+    <tr>
+        <td><strong>OPSWAT</strong></td>
+        <td>✅ Secondary</td>
+        <td>❌</td>
+        <td>❌</td>
+    </tr>
+    <tr>
+        <td><strong>Token Library</strong></td>
+        <td>✅ Internal list</td>
+        <td>✅ Internal list</td>
+        <td>✅ <strong>Only source!</strong></td>
+    </tr>
+    <tr>
+        <td><strong>DNS Resolver</strong></td>
+        <td>❌</td>
+        <td>✅ Sinkhole detection</td>
+        <td>❌</td>
+    </tr>
+    <tr>
+        <td><strong>Customer Blocklist</strong></td>
+        <td>✅ Customer-defined</td>
+        <td>✅ Customer-defined</td>
+        <td>✅ Customer-defined</td>
+    </tr>
+</table>
+
+<div class="warning-box">
+    <strong>IP Classification Note:</strong> IP classification only uses the <strong>Token library</strong> (internal curated list). 
+    There is NO VirusTotal or other external API for IP classification in Sage.
+</div>
+
+<h3>MongoDB Collections by Type</h3>
+
+<table>
+    <tr>
+        <th>Type</th>
+        <th>Collection</th>
+        <th>Data Source</th>
+    </tr>
+    <tr>
+        <td rowspan="3"><strong>File</strong></td>
+        <td><code>file_rep</code></td>
+        <td>VirusTotal</td>
+    </tr>
+    <tr>
+        <td><code>file_rep_revlabs</code></td>
+        <td>Reversing Labs</td>
+    </tr>
+    <tr>
+        <td><code>file_rep_opswat</code></td>
+        <td>OPSWAT</td>
+    </tr>
+    <tr>
+        <td rowspan="2"><strong>Domain</strong></td>
+        <td><code>domain_classification</code></td>
+        <td>VirusTotal</td>
+    </tr>
+    <tr>
+        <td><code>domain_dns</code></td>
+        <td>DNS Resolver</td>
+    </tr>
+    <tr>
+        <td><strong>IP</strong></td>
+        <td><code>ip_classification</code></td>
+        <td>Token only</td>
+    </tr>
+    <tr>
+        <td rowspan="3"><strong>Customer</strong></td>
+        <td><code>file_classification_sage_customer</code></td>
+        <td>Customer upload</td>
+    </tr>
+    <tr>
+        <td><code>domain_classification_sage_customer</code></td>
+        <td>Customer upload</td>
+    </tr>
+    <tr>
+        <td><code>ip_classification_sage_customer</code></td>
+        <td>Customer upload</td>
+    </tr>
+    <tr>
+        <td><strong>Shared</strong></td>
+        <td><code>TOKENS</code></td>
+        <td>Internal curated list (File/Domain/IP)</td>
+    </tr>
+</table>
+
+<h2>3. MongoDB Data Export</h2>
+
+<h3>2.1 Export Commands</h3>
+
+<pre>
+# Connect to Sage MongoDB
+mongo --host &lt;SAGE_MONGO_HOST&gt; --port 27017 -u &lt;USER&gt; -p &lt;PASS&gt; --authenticationDatabase admin
+
+# Export entire collection to BSON
+mongodump --host &lt;HOST&gt; --db sage_global --collection file_rep --out ./export/
+
+# Export to JSON (for smaller collections)
+mongoexport --host &lt;HOST&gt; --db sage_global --collection TOKENS --out tokens.json
+
+# Export with query (e.g., only malware)
+mongoexport --host &lt;HOST&gt; --db sage_global --collection file_rep \
+  --query '{"value.maliciousClassification.type": "malware"}' \
+  --out malware_files.json
+</pre>
+
+<h3>2.2 MongoDB Collections Reference</h3>
+
+<table>
+    <tr>
+        <th>Collection</th>
+        <th>Key Field (<code>_id</code>)</th>
+        <th>Important Fields</th>
+    </tr>
+    <tr>
+        <td><code>file_rep</code></td>
+        <td>SHA1</td>
+        <td><code>value.md5</code>, <code>value.sha256</code>, <code>value.maliciousClassification</code>, <code>value.positives</code></td>
+    </tr>
+    <tr>
+        <td><code>domain_classification</code></td>
+        <td>Domain name</td>
+        <td><code>value.maliciousClassification</code>, <code>value.categories</code>, <code>value.resolutions</code></td>
+    </tr>
+    <tr>
+        <td><code>domain_dns</code></td>
+        <td>Domain name</td>
+        <td><code>value.resolvedIpAddress</code>, <code>value.nameServers</code>, <code>value.sinkholeIdentifierInfo</code></td>
+    </tr>
+    <tr>
+        <td><code>TOKENS</code></td>
+        <td>SHA1 / Domain / IP</td>
+        <td><code>value.maliciousType</code>, <code>value.productType</code>, <code>value.source</code></td>
+    </tr>
+    <tr>
+        <td><code>file_rep_revlabs</code></td>
+        <td>SHA1</td>
+        <td><code>value.classification</code>, <code>value.threatName</code></td>
+    </tr>
+    <tr>
+        <td><code>file_rep_opswat</code></td>
+        <td>SHA1</td>
+        <td><code>value.scanResults</code>, <code>value.threatName</code></td>
+    </tr>
+</table>
+
+<h3>2.3 Sample Export Script</h3>
+
+<pre>
+#!/bin/bash
+# export_sage_data.sh
+
+MONGO_HOST="sage-mongo.cybereason.net"
+DB_NAME="sage_global"
+OUTPUT_DIR="./sage_export_$(date +%Y%m%d)"
+
+mkdir -p $OUTPUT_DIR
+
+# Core collections
+COLLECTIONS=(
+    "file_rep"
+    "domain_classification"
+    "domain_dns"
+    "TOKENS"
+    "file_rep_revlabs"
+    "file_rep_opswat"
+    "av_classification"
+)
+
+for collection in "${COLLECTIONS[@]}"; do
+    echo "Exporting $collection..."
+    mongodump --host $MONGO_HOST --db $DB_NAME \
+        --collection $collection \
+        --out $OUTPUT_DIR
+done
+
+echo "Export complete: $OUTPUT_DIR"
+</pre>
+
+<h2>3. GCS Data Export (VT Feeder)</h2>
+
+<div class="warning-box">
+    <strong>Important:</strong> VT Feeder data in GCS contains the raw VirusTotal reports. This is the most up-to-date source for VT data.
+</div>
+
+<h3>3.1 GCS Buckets</h3>
+
+<table>
+    <tr>
+        <th>Bucket</th>
+        <th>Path</th>
+        <th>Content</th>
+        <th>Format</th>
+    </tr>
+    <tr>
+        <td><code>vt-file-feeder</code></td>
+        <td><code>/latest-reports/{sha1}</code></td>
+        <td>Raw VirusTotal file reports</td>
+        <td>JSON</td>
+    </tr>
+    <tr>
+        <td><code>broccoli-enricher</code></td>
+        <td><code>/latest-reports/{sha1}</code></td>
+        <td>Pre-computed classification</td>
+        <td>JSON</td>
+    </tr>
+</table>
+
+<h3>3.2 GCS Export Commands</h3>
+
+<pre>
+# Install gsutil if not already installed
+# pip install gsutil
+
+# Authenticate
+gcloud auth login
+
+# List files in bucket
+gsutil ls gs://vt-file-feeder/latest-reports/ | head -100
+
+# Download single file
+gsutil cp gs://vt-file-feeder/latest-reports/&lt;sha1&gt; ./
+
+# Download batch (use with caution - large data!)
+gsutil -m cp -r gs://vt-file-feeder/latest-reports/ ./vt_reports/
+
+# Download with filter (files modified in last 7 days)
+gsutil ls -l gs://vt-file-feeder/latest-reports/ | \
+  awk '$1 > "2024-01-01" {print $3}' | \
+  gsutil -m cp -I ./recent_reports/
+</pre>
+
+<h3>3.3 GCS Sample Data Structure</h3>
+
+<pre>
+// gs://vt-file-feeder/latest-reports/{sha1}
+{
+  "sha1": "a1b2c3d4e5f6...",
+  "sha256": "...",
+  "md5": "...",
+  "positives": 45,
+  "total": 70,
+  "scan_date": "2024-01-15 10:30:00",
+  "scans": {
+    "Kaspersky": { "detected": true, "result": "Trojan.Win32.Generic" },
+    "McAfee": { "detected": true, "result": "GenericRXAA-AA!A1B2C3D4E5F6" },
+    ...
+  },
+  "submission_names": ["malware.exe", "setup.exe", ...],
+  "additional_info": { ... }
+}
+</pre>
+
+<h2>4. Direct API Access (Alternative)</h2>
+
+<p>If you need real-time data instead of bulk export, you can call external APIs directly:</p>
+
+<table>
+    <tr>
+        <th>Data Source</th>
+        <th>API Endpoint</th>
+        <th>Auth</th>
+        <th>Rate Limit</th>
+    </tr>
+    <tr>
+        <td><strong>VirusTotal</strong></td>
+        <td><code>GET https://www.virustotal.com/vtapi/v2/file/report?resource={hash}</code></td>
+        <td>API Key (query param)</td>
+        <td>4 req/min (free), higher for enterprise</td>
+    </tr>
+    <tr>
+        <td><strong>Reversing Labs</strong></td>
+        <td><code>GET https://ticloud-aws1-api.reversinglabs.com/api/databrowser/malware_presence/query/sha1/{hash}</code></td>
+        <td>Basic Auth</td>
+        <td>Depends on license</td>
+    </tr>
+    <tr>
+        <td><strong>OPSWAT</strong></td>
+        <td><code>GET https://api.metadefender.com/v2/hash/{hash}</code></td>
+        <td>Header: <code>apikey</code></td>
+        <td>Depends on license</td>
+    </tr>
+</table>
+
+<h2>5. Migration Strategy Recommendations</h2>
+
+<h3>Option A: Full MongoDB Export (Recommended for initial migration)</h3>
+
+<div class="success-box">
+    <strong>Pros:</strong> Complete data, includes all cached results<br>
+    <strong>Cons:</strong> Large data volume, may include stale data
+</div>
+
+<pre>
+1. Export MongoDB collections using mongodump
+2. Transform BSON to target format
+3. Import to Phoenix database
+4. Set up ongoing sync via API or change streams
+</pre>
+
+<h3>Option B: GCS Direct Access (Recommended for VT data)</h3>
+
+<div class="success-box">
+    <strong>Pros:</strong> Most up-to-date VT data, raw reports available<br>
+    <strong>Cons:</strong> Need GCS credentials, large storage
+</div>
+
+<pre>
+1. Set up GCS credentials for Phoenix
+2. Read directly from vt-file-feeder bucket
+3. Process and store in Phoenix format
+4. Use broccoli-enricher for pre-computed classifications
+</pre>
+
+<h3>Option C: Hybrid Approach (Best of both)</h3>
+
+<pre>
+1. Export Token library from MongoDB (small, critical)
+2. Export DNS resolution cache from MongoDB
+3. Connect Phoenix directly to GCS for VT data
+4. Call Reversing Labs / OPSWAT APIs as needed (real-time)
+</pre>
+
+<h2>6. Data Fields to Migrate</h2>
+
+<h3>Essential Fields (Must Have)</h3>
+
+<table>
+    <tr>
+        <th>Field</th>
+        <th>Type</th>
+        <th>Source</th>
+        <th>Description</th>
+    </tr>
+    <tr>
+        <td><code>sha1</code></td>
+        <td>String (40)</td>
+        <td>All</td>
+        <td>Primary key for file queries</td>
+    </tr>
+    <tr>
+        <td><code>md5</code></td>
+        <td>String (32)</td>
+        <td>All</td>
+        <td>Secondary key</td>
+    </tr>
+    <tr>
+        <td><code>sha256</code></td>
+        <td>String (64)</td>
+        <td>VT</td>
+        <td>Secondary key</td>
+    </tr>
+    <tr>
+        <td><code>maliciousClassification.type</code></td>
+        <td>Enum</td>
+        <td>All</td>
+        <td>malware, indifferent, unknown, whitelist, etc.</td>
+    </tr>
+    <tr>
+        <td><code>maliciousClassification.subTypes</code></td>
+        <td>List</td>
+        <td>VT</td>
+        <td>trojan, ransomware, worm, etc.</td>
+    </tr>
+    <tr>
+        <td><code>positives</code></td>
+        <td>Integer</td>
+        <td>VT</td>
+        <td>Number of AV detections</td>
+    </tr>
+    <tr>
+        <td><code>total</code></td>
+        <td>Integer</td>
+        <td>VT</td>
+        <td>Total AV engines scanned</td>
+    </tr>
+</table>
+
+<h3>Optional Fields (Nice to Have)</h3>
+
+<table>
+    <tr>
+        <th>Field</th>
+        <th>Source</th>
+        <th>Reason to Skip</th>
+    </tr>
+    <tr>
+        <td><code>submission_names</code></td>
+        <td>VT</td>
+        <td>Large (80+ names per file), not used for queries</td>
+    </tr>
+    <tr>
+        <td><code>scans</code> (full)</td>
+        <td>VT</td>
+        <td>Very large, can re-fetch from GCS if needed</td>
+    </tr>
+    <tr>
+        <td><code>additional_info</code></td>
+        <td>VT</td>
+        <td>PE metadata, can be large</td>
+    </tr>
+</table>
+
+<h2>7. Quick Start Checklist</h2>
+
+<div class="info-box">
+<strong>Before Migration:</strong>
+<ol>
+    <li>☐ Get MongoDB connection credentials (host, user, password)</li>
+    <li>☐ Get GCS service account credentials (for VT Feeder access)</li>
+    <li>☐ Estimate storage requirements (~100GB+ for full export)</li>
+    <li>☐ Plan for incremental sync after initial migration</li>
+</ol>
+</div>
+
+</body>
+</html>

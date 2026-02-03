@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phoenix Flink TI Enrichment - Data Migration Status</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #1e40af;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-color: #1e293b;
+            --border-color: #e2e8f0;
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+        
+        .container { max-width: 1000px; margin: 0 auto; }
+        
+        h1 {
+            color: var(--primary-color);
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            border-bottom: 3px solid var(--primary-color);
+            padding-bottom: 1rem;
+        }
+        
+        .subtitle { color: #64748b; font-size: 0.9rem; margin-bottom: 2rem; }
+        
+        h2 {
+            color: var(--secondary-color);
+            font-size: 1.5rem;
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--border-color);
+        }
+        
+        h3 { color: var(--text-color); font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.75rem; }
+        
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            border: 1px solid var(--border-color);
+        }
+        
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .summary-item {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+            border: 1px solid var(--border-color);
+        }
+        
+        .summary-number { font-size: 2rem; font-weight: 700; color: var(--primary-color); }
+        .summary-label { font-size: 0.85rem; color: #64748b; }
+        
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid var(--border-color); }
+        th { background-color: #f1f5f9; font-weight: 600; color: var(--secondary-color); }
+        tr:hover { background-color: #f8fafc; }
+        
+        code {
+            background-color: #f1f5f9;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.85em;
+            color: var(--danger-color);
+        }
+        
+        .status-done {
+            display: inline-block;
+            background-color: #dcfce7;
+            color: #166534;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .status-progress {
+            display: inline-block;
+            background-color: #fef3c7;
+            color: #92400e;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .status-pending {
+            display: inline-block;
+            background-color: #f1f5f9;
+            color: #475569;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .status-blocked {
+            display: inline-block;
+            background-color: #fee2e2;
+            color: #991b1b;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .highlight-box {
+            background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+            border-left: 4px solid var(--primary-color);
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .warning-box {
+            background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+            border-left: 4px solid var(--warning-color);
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .risk-high { color: #dc2626; font-weight: 600; }
+        .risk-medium { color: #d97706; font-weight: 600; }
+        .risk-low { color: #16a34a; font-weight: 600; }
+        
+        ul { margin-left: 1.5rem; margin-bottom: 1rem; }
+        li { margin-bottom: 0.5rem; }
+        
+        .ref-link { color: var(--primary-color); text-decoration: none; }
+        .ref-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Phoenix Flink TI Enrichment</h1>
+        <p class="subtitle">Data Migration Status | Last Updated: 2026-02-03</p>
+
+        <!-- Executive Summary -->
+        <h2>1. Executive Summary</h2>
+        
+        <div class="summary-grid">
+            <div class="summary-item">
+                <div class="summary-number">6</div>
+                <div class="summary-label">TiDB Tables</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-number">3</div>
+                <div class="summary-label">Completed</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-number">1</div>
+                <div class="summary-label">In Progress</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-number">2</div>
+                <div class="summary-label">Pending</div>
+            </div>
+        </div>
+
+        <div class="highlight-box">
+            <strong>Goal:</strong> Migrate Threat Intelligence data from Sage MongoDB to TiDB for Phoenix Flink real-time enrichment, reducing dependency on Sage service.
+        </div>
+
+        <!-- TiDB Tables Status -->
+        <h2>2. TiDB Tables Status</h2>
+        
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Table</th>
+                        <th>Data Source</th>
+                        <th>Est. Records</th>
+                        <th>Status</th>
+                        <th>Notes</th>
+                        <th style="color: #dc2626;">Issues</th>
+                        <th>Update/Refresh Plan</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>ioc_tokens</code></td>
+                        <td>MongoDB TOKENS</td>
+                        <td>~2,500</td>
+                        <td><span class="status-done">Done</span></td>
+                        <td>Internal threat intel</td>
+                        <td>—</td>
+                        <td>Manually maintained<br><code>Sage: /download_v1/tokens</code></td>
+                    </tr>
+                    <tr>
+                        <td><code>ioc_file_hashes</code></td>
+                        <td>MongoDB file_rep</td>
+                        <td>~1M</td>
+                        <td><span class="status-progress">In Progress</span></td>
+                        <td>r06 tested, others pending</td>
+                        <td style="color: #dc2626;">Some records missing classification</td>
+                        <td>
+                            <code>GCS: vt-file-feeder/latest-reports/{sha1}</code><br>
+                            <code>GCS: broccoli-enricher/latest-reports/{sha1}</code><br>
+                            <code>VT API: POST /vtapi/v2/file/report</code>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>ioc_domains</code></td>
+                        <td>MongoDB domain_classification</td>
+                        <td>TBD</td>
+                        <td><span class="status-pending">Pending</span></td>
+                        <td>Need processing script</td>
+                        <td>—</td>
+                        <td>
+                            No GCS cache for domains<br>
+                            <code>VT API: GET /vtapi/v2/domain/report?domain={domain}</code>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>ioc_ips</code></td>
+                        <td>ioc_tokens + SINKHOLE_IDENTIFIERS</td>
+                        <td>~3,500</td>
+                        <td><span class="status-blocked">Blocked</span></td>
+                        <td>Depends on tokens (now ready)</td>
+                        <td>—</td>
+                        <td>Manually maintained<br><code>Sage: /download_v1/sinkhole_identifiers</code></td>
+                    </tr>
+                    <tr>
+                        <td><code>file_extension_classification</code></td>
+                        <td>MongoDB FILE_EXTENSION_CLASSIFICATION</td>
+                        <td>~337</td>
+                        <td><span class="status-done">Done</span></td>
+                        <td>Small dataset, direct import</td>
+                        <td>—</td>
+                        <td>Static data, rarely changes<br><code>Sage: /download_v1/file_extension</code></td>
+                    </tr>
+                    <tr>
+                        <td><code>customer_ioc</code></td>
+                        <td>Phoenix Portal API</td>
+                        <td>Per customer</td>
+                        <td><span class="status-done">Schema Ready</span></td>
+                        <td>Runtime populated</td>
+                        <td>—</td>
+                        <td>Runtime via Phoenix Portal API<br>(no sync with Sage needed)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Completed Work -->
+        <h2>3. Completed Work</h2>
+        
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Item</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>TiDB Schema</td>
+                        <td>All 6 tables created with migrations</td>
+                    </tr>
+                    <tr>
+                        <td>Flink Integration</td>
+                        <td><code>ThreatIntelService</code> interface + <code>TidbStorage</code> implementation</td>
+                    </tr>
+                    <tr>
+                        <td>BSON Processor</td>
+                        <td><code>parallel_bson_processor.py</code> - tested on r06 shard</td>
+                    </tr>
+                    <tr>
+                        <td>TiDB Importer</td>
+                        <td><code>tidb_importer.py</code> - ready for use</td>
+                    </tr>
+                    <tr>
+                        <td>TOKENS Migration</td>
+                        <td>~2,500 records imported to <code>ioc_tokens</code></td>
+                    </tr>
+                    <tr>
+                        <td>FILE_EXTENSION_CLASSIFICATION Migration</td>
+                        <td>~337 records imported to <code>file_extension_classification</code></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- In Progress -->
+        <h2>4. In Progress</h2>
+        
+        <div class="card">
+            <h3>File Hash Migration (ioc_file_hashes)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Shard</th>
+                        <th>Input Size</th>
+                        <th>Status</th>
+                        <th>Output</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>r06</td>
+                        <td>832 GB</td>
+                        <td><span class="status-done">Done</span></td>
+                        <td>142,949 records / 230 MB</td>
+                    </tr>
+                    <tr>
+                        <td>r01</td>
+                        <td>~900 GB</td>
+                        <td><span class="status-pending">Pending</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>r02</td>
+                        <td>~900 GB</td>
+                        <td><span class="status-pending">Pending</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>r03</td>
+                        <td>~900 GB</td>
+                        <td><span class="status-pending">Pending</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>r04</td>
+                        <td>~900 GB</td>
+                        <td><span class="status-pending">Pending</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>r05</td>
+                        <td>~900 GB</td>
+                        <td><span class="status-pending">Pending</span></td>
+                        <td>-</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p><strong>Estimated total:</strong> ~1M records, ~1.5 GB compressed, ~25 hours processing</p>
+        </div>
+
+        <!-- Pending Tasks -->
+        <h2>5. Pending Tasks</h2>
+        
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Task</th>
+                        <th>Priority</th>
+                        <th>Blocked By</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Process remaining 5 file_rep shards</td>
+                        <td><span class="risk-high">High</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>Import file_rep to TiDB</td>
+                        <td><span class="risk-high">High</span></td>
+                        <td>Shard processing</td>
+                    </tr>
+                    <tr>
+                        <td>Import SINKHOLE_IDENTIFIERS to ioc_ips</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>Extract IP entries from ioc_tokens to ioc_ips</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td>Domain processing script</td>
+                        <td><span class="risk-low">Low</span></td>
+                        <td>-</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Dependencies -->
+        <h2>6. Dependencies</h2>
+        
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Item</th>
+                        <th>Depends On</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>ioc_ips</code> data</td>
+                        <td><code>ioc_tokens</code> migration</td>
+                        <td><span class="status-done">Ready</span></td>
+                    </tr>
+                    <tr>
+                        <td>TiDB import</td>
+                        <td>BSON processing complete</td>
+                        <td><span class="status-progress">Partial</span></td>
+                    </tr>
+                    <tr>
+                        <td>E2E testing</td>
+                        <td>At least one table populated</td>
+                        <td><span class="status-done">Ready</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Open Questions -->
+        <h2>7. Open Questions</h2>
+        
+        <div class="card">
+            <ul>
+                <li><strong>Data freshness:</strong> MongoDB snapshot is from 2020-11-05. How to handle updates for data after this date?
+                    <ul>
+                        <li>Option A: Direct VT Feeder GCS access from Phoenix</li>
+                        <li>Option B: Periodic sync job</li>
+                    </ul>
+                </li>
+                <li><strong>Domain data volume:</strong> Need to estimate filtered output size for domain_classification (446 GB raw)</li>
+                <li><strong>URL data:</strong> Currently not planned - stored in BigQuery, low query volume</li>
+            </ul>
+        </div>
+
+        <!-- Related Documents -->
+        <h2>8. Related Documents</h2>
+        
+        <div class="card">
+            <ul>
+                <li>Sage Data Sources Reference</li>
+                <li>Sage Data Migration Guide</li>
+                <li>Sage MongoDB Production Dump Index</li>
+                <li>VT Feeder Unboxing</li>
+                <li>Sage to TiDB Data Migration: Network Cost Analysis</li>
+            </ul>
+        </div>
+
+        <!-- Appendix A: Data Flow by Type -->
+        <h2>Appendix A: Data Flow by Type</h2>
+
+        <div class="highlight-box">
+            <strong>Architecture Overview:</strong><br>
+            <strong>Sage Mode:</strong> Query external sources (VT Feeder, VT API) → Cache in MongoDB → Return to client<br>
+            <strong>Phoenix Mode:</strong> Pre-import historical data to TiDB → Flink queries TiDB directly (no external calls)
+        </div>
+
+        <!-- File Hash -->
+        <div class="card">
+            <h3>📁 File Hash</h3>
+            <pre style="background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 8px; font-size: 0.75rem; overflow-x: auto; white-space: pre;">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  SAGE MODE                                                                      │
+│                                                                                 │
+│   Query Request (SHA1/MD5/SHA256)                                               │
+│          │                                                                      │
+│          ▼                                                                      │
+│   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                   │
+│   │ VT Feeder    │ ──▶ │ Broccoli ML  │ ──▶ │ MongoDB      │                   │
+│   │ (GCS)        │     │ (GCS)        │     │ file_rep     │                   │
+│   │              │     │              │     │ (Cache)      │                   │
+│   │ latest-      │     │ latest-      │     │              │                   │
+│   │ reports/     │     │ reports/     │     │ 5.6 TB       │                   │
+│   │ {sha1}       │     │ {sha1}       │     │ ~9.9B records│                   │
+│   └──────────────┘     └──────────────┘     └──────────────┘                   │
+│         │                    │                                                  │
+│         │   Fallback: VT API (if not in GCS)                                   │
+│         ▼                                                                      │
+│   ┌──────────────┐                                                             │
+│   │ VT Lookup    │                                                             │
+│   │ API          │                                                             │
+│   └──────────────┘                                                             │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  PHOENIX MODE                                                                   │
+│                                                                                 │
+│   ┌──────────────┐                          ┌──────────────┐                   │
+│   │ TiDB         │  ◀─── One-time Import ───│ MongoDB      │                   │
+│   │ ioc_file_    │                          │ file_rep     │                   │
+│   │ hashes       │                          │ (filtered)   │                   │
+│   │              │                          │              │                   │
+│   │ ~1M records  │                          │ ~1M valid    │                   │
+│   │ ~100 MB      │                          │ records      │                   │
+│   └──────────────┘                          └──────────────┘                   │
+│         ▲                                                                      │
+│         │                                                                      │
+│   Flink Query (SHA1/MD5/SHA256)                                                │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  MIGRATION PLAN                                                                 │
+│                                                                                 │
+│   MongoDB file_rep (5.6 TB) ──▶ parallel_bson_processor.py ──▶ TiDB           │
+│                                                                                 │
+│   • Filter: response_code=1 AND classification NOT IN (indifferent, unknown)   │
+│   • Keep: Full value object (for future Broccoli re-classification)            │
+│   • Output: ~1M records, ~1.5 GB compressed                                    │
+│   • Status: r06 done, r01-r05 pending (~25 hours total)                        │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘</pre>
+        </div>
+
+        <!-- Domain -->
+        <div class="card">
+            <h3>🌐 Domain</h3>
+            <pre style="background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 8px; font-size: 0.75rem; overflow-x: auto; white-space: pre;">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  SAGE MODE                                                                      │
+│                                                                                 │
+│   Query Request (domain name)                                                   │
+│          │                                                                      │
+│          ▼                                                                      │
+│   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                   │
+│   │ VT Lookup    │ ──▶ │ DNS          │ ──▶ │ Sinkhole     │                   │
+│   │ API          │     │ Resolution   │     │ Check        │                   │
+│   │              │     │              │     │              │                   │
+│   │ Direct call  │     │ Check if     │     │ Match IP vs  │                   │
+│   │ (no GCS!)    │     │ resolvable   │     │ SINKHOLE_IDS │                   │
+│   └──────────────┘     └──────────────┘     └──────────────┘                   │
+│          │                                                                      │
+│          ▼                                                                      │
+│   ┌──────────────────────────────────┐                                         │
+│   │ MongoDB Cache                    │                                         │
+│   │ • domain_classification (446 GB) │                                         │
+│   │ • domain_dns (3.85 TB)           │                                         │
+│   └──────────────────────────────────┘                                         │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  PHOENIX MODE                                                                   │
+│                                                                                 │
+│   ┌──────────────┐                          ┌──────────────┐                   │
+│   │ TiDB         │  ◀─── One-time Import ───│ MongoDB      │                   │
+│   │ ioc_domains  │                          │ domain_      │                   │
+│   │              │                          │ classification│                   │
+│   │ TBD records  │                          │ (filtered)   │                   │
+│   └──────────────┘                          └──────────────┘                   │
+│         ▲                                                                      │
+│         │                                                                      │
+│   Flink Query (domain)                                                         │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  MIGRATION PLAN                                                                 │
+│                                                                                 │
+│   MongoDB domain_classification (446 GB) ──▶ [script TBD] ──▶ TiDB            │
+│                                                                                 │
+│   • Filter: Similar to file_rep (skip indifferent/unknown)                     │
+│   • Note: No VT Feeder for domain, so MongoDB is the only historical source    │
+│   • Status: Pending - need to develop processing script                        │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘</pre>
+        </div>
+
+        <!-- IP -->
+        <div class="card">
+            <h3>🔢 IP Address</h3>
+            <pre style="background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 8px; font-size: 0.75rem; overflow-x: auto; white-space: pre;">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  SAGE MODE                                                                      │
+│                                                                                 │
+│   Query Request (IP address)                                                    │
+│          │                                                                      │
+│          ▼                                                                      │
+│   ┌──────────────────────────────────┐                                         │
+│   │ MongoDB (Internal Data Only)     │  ⚠️ No VT Feeder, No VT API for IP      │
+│   │                                  │                                         │
+│   │ • SINKHOLE_IDENTIFIERS (456 KB)  │  → Known sinkhole IPs                   │
+│   │   ~3,000 IPs                     │                                         │
+│   │                                  │                                         │
+│   │ • TOKENS (IP entries)            │  → Internal threat intel IPs            │
+│   │   ~500 IPs                       │                                         │
+│   │                                  │                                         │
+│   └──────────────────────────────────┘                                         │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  PHOENIX MODE                                                                   │
+│                                                                                 │
+│   ┌──────────────┐                          ┌──────────────┐                   │
+│   │ TiDB         │  ◀─── One-time Import ───│ MongoDB      │                   │
+│   │ ioc_ips      │                          │ SINKHOLE_IDS │                   │
+│   │              │                          │ + TOKENS(IP) │                   │
+│   │ ~3,500 IPs   │                          │              │                   │
+│   │ ~300 KB      │                          │              │                   │
+│   └──────────────┘                          └──────────────┘                   │
+│         ▲                                                                      │
+│         │                                                                      │
+│   Flink Query (IP)                                                             │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  MIGRATION PLAN                                                                 │
+│                                                                                 │
+│   Source 1: SINKHOLE_IDENTIFIERS (456 KB)                                      │
+│   • classification = SINKHOLED                                                 │
+│   • sinkhole_entity = value.entity (e.g., "Georgia Tech / Damballa")          │
+│                                                                                 │
+│   Source 2: TOKENS where type = "IPv4"                                         │
+│   • classification = value.maliciousType (malware, etc.)                       │
+│                                                                                 │
+│   Status: Blocked - depends on ioc_tokens (now ready)                          │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘</pre>
+        </div>
+
+        <!-- URL -->
+        <div class="card">
+            <h3>🔗 URL</h3>
+            <pre style="background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 8px; font-size: 0.75rem; overflow-x: auto; white-space: pre;">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  SAGE MODE                                                                      │
+│                                                                                 │
+│   Query Request (URL)                                                           │
+│          │                                                                      │
+│          ▼                                                                      │
+│   ┌──────────────┐                          ┌──────────────┐                   │
+│   │ VT Lookup    │ ───────────────────────▶ │ BigQuery     │                   │
+│   │ API          │                          │ (Archive)    │                   │
+│   │              │                          │              │                   │
+│   │ Direct call  │                          │ vt-url-      │                   │
+│   │ (no GCS!)    │                          │ feeder data  │                   │
+│   └──────────────┘                          └──────────────┘                   │
+│                                                                                 │
+│   ⚠️ VT Feeder stores URL by date, NOT by URL identifier                       │
+│   ⚠️ No MongoDB cache for URL                                                  │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  PHOENIX MODE                                                                   │
+│                                                                                 │
+│   ❌ NOT PLANNED for initial migration                                          │
+│                                                                                 │
+│   Reasons:                                                                      │
+│   • Low query volume compared to File/Domain                                   │
+│   • No historical cache in MongoDB                                             │
+│   • URL as key is problematic (variable length, encoding issues)               │
+│   • Data in BigQuery, not suitable for real-time lookup                        │
+│                                                                                 │
+│   Future Option: Direct VT API call from Flink (if needed)                     │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘</pre>
+        </div>
+
+        <!-- File Extension -->
+        <div class="card">
+            <h3>📄 File Extension</h3>
+            <pre style="background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 8px; font-size: 0.75rem; overflow-x: auto; white-space: pre;">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  SAGE MODE                                                                      │
+│                                                                                 │
+│   Query Request (file extension, e.g., ".exe", ".pdf.exe")                     │
+│          │                                                                      │
+│          ▼                                                                      │
+│   ┌──────────────────────────────────┐                                         │
+│   │ MongoDB                          │  Static data, rarely changes            │
+│   │ FILE_EXTENSION_CLASSIFICATION    │                                         │
+│   │                                  │                                         │
+│   │ ~337 extensions                  │                                         │
+│   │ 105 KB                           │                                         │
+│   └──────────────────────────────────┘                                         │
+│                                                                                 │
+│   Used for: Double extension detection (e.g., "document.pdf.exe")              │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  PHOENIX MODE                                                                   │
+│                                                                                 │
+│   ┌──────────────────────────┐       ┌──────────────────────────┐              │
+│   │ TiDB                     │ ◀──── │ MongoDB                  │              │
+│   │ file_extension_          │       │ FILE_EXTENSION_          │              │
+│   │ classification           │       │ CLASSIFICATION           │              │
+│   │                          │       │                          │              │
+│   │ ~337 records             │       │ Direct JSON import       │              │
+│   └──────────────────────────┘       └──────────────────────────┘              │
+│         ▲                                                                      │
+│         │                                                                      │
+│   Flink Query (extension)                                                      │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  MIGRATION PLAN                                                                 │
+│                                                                                 │
+│   Status: ✅ DONE                                                               │
+│                                                                                 │
+│   • Simple JSON conversion and import                                          │
+│   • ~337 records imported                                                      │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘</pre>
+        </div>
+
+        <!-- Internal Threat Intel (TOKENS) -->
+        <div class="card">
+            <h3>🎯 Internal Threat Intel (TOKENS)</h3>
+            <pre style="background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 8px; font-size: 0.75rem; overflow-x: auto; white-space: pre;">
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  SAGE MODE                                                                      │
+│                                                                                 │
+│   Query Request (hash, domain, IP, etc.)                                        │
+│          │                                                                      │
+│          ▼                                                                      │
+│   ┌──────────────────────────────────┐                                         │
+│   │ MongoDB TOKENS                   │  Curated internal threat intelligence   │
+│   │                                  │                                         │
+│   │ ~2,500 indicators                │  Types: SHA1, MD5, Domain, IPv4, etc.   │
+│   │ 890 KB                           │                                         │
+│   │                                  │                                         │
+│   │ Sources: Internal research,      │                                         │
+│   │ campaigns, verified threats      │                                         │
+│   └──────────────────────────────────┘                                         │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  PHOENIX MODE                                                                   │
+│                                                                                 │
+│   ┌──────────────────────────┐       ┌──────────────────────────┐              │
+│   │ TiDB                     │ ◀──── │ MongoDB                  │              │
+│   │ ioc_tokens               │       │ TOKENS                   │              │
+│   │                          │       │                          │              │
+│   │ ~2,500 records           │       │ Direct JSON import       │              │
+│   └──────────────────────────┘       └──────────────────────────┘              │
+│         ▲                                                                      │
+│         │                                                                      │
+│   Flink Query (by indicator type)                                              │
+│                                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  MIGRATION PLAN                                                                 │
+│                                                                                 │
+│   Status: ✅ DONE                                                               │
+│                                                                                 │
+│   • ~2,500 records imported to ioc_tokens                                      │
+│   • IP entries will also be copied to ioc_ips                                  │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘</pre>
+        </div>
+
+        <!-- Summary Table -->
+        <div class="card">
+            <h3>Summary: Data Flow Comparison</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Type</th>
+                        <th>Sage: External Source</th>
+                        <th>Sage: Cache</th>
+                        <th>Phoenix: Source</th>
+                        <th>Migration Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>File Hash</strong></td>
+                        <td>VT Feeder (GCS) + Broccoli ML</td>
+                        <td>MongoDB file_rep</td>
+                        <td>TiDB ioc_file_hashes</td>
+                        <td><span class="status-progress">In Progress</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Domain</strong></td>
+                        <td>VT Lookup API</td>
+                        <td>MongoDB domain_classification</td>
+                        <td>TiDB ioc_domains</td>
+                        <td><span class="status-pending">Pending</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>IP</strong></td>
+                        <td>— (Internal only)</td>
+                        <td>MongoDB SINKHOLE + TOKENS</td>
+                        <td>TiDB ioc_ips</td>
+                        <td><span class="status-blocked">Blocked</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>URL</strong></td>
+                        <td>VT Lookup API</td>
+                        <td>BigQuery (archive)</td>
+                        <td>— (Not planned)</td>
+                        <td><span style="color:#64748b">N/A</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Extension</strong></td>
+                        <td>— (Static)</td>
+                        <td>MongoDB FILE_EXT_CLASS</td>
+                        <td>TiDB file_extension_class</td>
+                        <td><span class="status-done">Done</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>TOKENS</strong></td>
+                        <td>— (Internal)</td>
+                        <td>MongoDB TOKENS</td>
+                        <td>TiDB ioc_tokens</td>
+                        <td><span class="status-done">Done</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Appendix B: Classification Reference -->
+        <h2>Appendix B: Classification Reference</h2>
+        
+        <div class="card">
+            <h3>Classification Enum Values</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Classification</th>
+                        <th>Description</th>
+                        <th>Applies To</th>
+                        <th>Priority</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>RANSOMWARE</code></td>
+                        <td>Ransomware</td>
+                        <td>File</td>
+                        <td><span class="risk-high">Highest</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>MALTOOL</code></td>
+                        <td>Malicious tool</td>
+                        <td>File</td>
+                        <td><span class="risk-high">High</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>HACKTOOL</code></td>
+                        <td>Hacking tool</td>
+                        <td>File</td>
+                        <td><span class="risk-high">High</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>UNWANTED</code></td>
+                        <td>PUP / Unwanted software</td>
+                        <td>File</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>MALWARE</code></td>
+                        <td>Generic malware</td>
+                        <td>File, Domain, IP</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>SUSPICIOUS</code></td>
+                        <td>Suspicious but unconfirmed</td>
+                        <td>File, Domain</td>
+                        <td><span class="risk-low">Low</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>AV_DETECTED</code></td>
+                        <td>AV engine detected (positives > 0)</td>
+                        <td>File</td>
+                        <td><span class="risk-low">Low</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>SINKHOLED</code></td>
+                        <td>Domain resolves to sinkhole IP</td>
+                        <td>Domain</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>UNRESOLVED</code></td>
+                        <td>Domain cannot be resolved</td>
+                        <td>Domain</td>
+                        <td><span class="risk-low">Low</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>BLACKLIST</code></td>
+                        <td>Customer blacklist</td>
+                        <td>All</td>
+                        <td>—</td>
+                    </tr>
+                    <tr>
+                        <td><code>WHITELIST</code></td>
+                        <td>Customer whitelist</td>
+                        <td>All</td>
+                        <td>—</td>
+                    </tr>
+                    <tr>
+                        <td><code>INDIFFERENT</code></td>
+                        <td>Neutral / benign</td>
+                        <td>File, Domain</td>
+                        <td><span style="color:#64748b">Skip</span></td>
+                    </tr>
+                    <tr>
+                        <td><code>UNKNOWN</code></td>
+                        <td>No data available</td>
+                        <td>All</td>
+                        <td><span style="color:#64748b">Skip</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h3>Classification Source (TiSource)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th>Description</th>
+                        <th>Data Origin</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>VIRUS_TOTAL</code></td>
+                        <td>VirusTotal scan result</td>
+                        <td>VT Feeder → MongoDB file_rep</td>
+                    </tr>
+                    <tr>
+                        <td><code>BROCCOLI</code></td>
+                        <td>Broccoli ML classification</td>
+                        <td>broccoli-enricher GCS bucket</td>
+                    </tr>
+                    <tr>
+                        <td><code>TOKENS</code></td>
+                        <td>Internal curated threat intel</td>
+                        <td>MongoDB TOKENS collection</td>
+                    </tr>
+                    <tr>
+                        <td><code>DOMAIN_DNS</code></td>
+                        <td>DNS resolution based</td>
+                        <td>MongoDB domain_dns</td>
+                    </tr>
+                    <tr>
+                        <td><code>SINKHOLE_IDENTIFIERS</code></td>
+                        <td>Sinkhole IP matching</td>
+                        <td>MongoDB SINKHOLE_IDENTIFIERS</td>
+                    </tr>
+                    <tr>
+                        <td><code>CUSTOMER</code></td>
+                        <td>Customer-defined IOC</td>
+                        <td>Phoenix Portal API</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="warning-box">
+            <strong>Broccoli ML Re-classification:</strong> The Broccoli service takes the full VT report (including <code>scans</code> from 70+ AV engines) as input and outputs a unified classification. This is why we preserve the full <code>value</code> object in our BSON processing - it enables future re-classification if needed.
+        </div>
+
+        <!-- Related Documents -->
+        <h2>Appendix C: Related Documents</h2>
+        
+        <div class="card">
+            <ul>
+                <li>Sage Data Sources Reference</li>
+                <li>Sage Data Migration Guide</li>
+                <li>Sage MongoDB Production Dump Index</li>
+                <li>VT Feeder Unboxing</li>
+                <li>Sage to TiDB Data Migration: Network Cost Analysis</li>
+            </ul>
+        </div>
+
+        <hr style="margin: 2rem 0; border: none; border-top: 1px solid var(--border-color);">
+        <p style="color: #64748b; font-size: 0.85rem; text-align: center;">
+            Phoenix Flink TI Data Migration | Updated: 2026-02-03
+        </p>
+    </div>
+</body>
+</html>

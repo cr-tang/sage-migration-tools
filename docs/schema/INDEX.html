@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sage MongoDB Production Dump Index</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --warning: #f59e0b;
+            --success: #10b981;
+            --danger: #ef4444;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+        
+        .container { max-width: 1200px; margin: 0 auto; }
+        
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary);
+        }
+        
+        h2 {
+            font-size: 1.5rem;
+            margin: 2rem 0 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--primary);
+        }
+        
+        h3 {
+            font-size: 1.2rem;
+            margin: 1.5rem 0 0.75rem;
+            color: var(--text);
+        }
+        
+        .meta {
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+        }
+        
+        .meta code {
+            background: var(--border);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        .alert {
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+        
+        .alert-warning {
+            background: #fef3c7;
+            border-left: 4px solid var(--warning);
+        }
+        
+        .alert-info {
+            background: #dbeafe;
+            border-left: 4px solid var(--primary);
+        }
+        
+        .alert-success {
+            background: #d1fae5;
+            border-left: 4px solid var(--success);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            background: var(--card-bg);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        th {
+            background: var(--primary);
+            color: white;
+            font-weight: 600;
+        }
+        
+        tr:hover { background: #f1f5f9; }
+        
+        .highlight { background: #fef9c3 !important; font-weight: 600; }
+        
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.875rem;
+        }
+        
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+        
+        pre code { color: inherit; background: none; }
+        
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .badge-success { background: #d1fae5; color: #065f46; }
+        .badge-warning { background: #fef3c7; color: #92400e; }
+        .badge-danger { background: #fee2e2; color: #991b1b; }
+        
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+        
+        .card {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        
+        .stat-label {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+        
+        .flow-chart {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+            font-family: monospace;
+            white-space: pre;
+            line-height: 1.4;
+        }
+        
+        .toc {
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .toc ul { list-style: none; }
+        .toc li { padding: 0.25rem 0; }
+        .toc a { color: var(--primary); text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Sage MongoDB Production Dump Index</h1>
+        <div class="meta">
+            <strong>Source:</strong> <code>gs://sage_prod_dump/</code><br>
+            <strong>Database:</strong> <code>cybereason</code><br>
+            <strong>Verified:</strong> 2026-01-26
+        </div>
+
+        <div class="toc">
+            <strong>Table of Contents</strong>
+            <ul>
+                <li><a href="#warning">⚠️ Two Dump Versions</a></li>
+                <li><a href="#migration">Data Migration Estimate</a></li>
+                <li><a href="#collections">Collection Summary</a></li>
+                <li><a href="#tidb">TiDB Migration Details</a></li>
+                <li><a href="#commands">Verification Commands</a></li>
+            </ul>
+        </div>
+
+        <h2 id="warning">⚠️ Important: Two Dump Versions Exist</h2>
+        
+        <div class="alert alert-warning">
+            The GCS bucket contains <strong>two separate dumps</strong> (total ~20 TB).<br>
+            <strong>Recommendation:</strong> Use <strong>Root directory</strong> (2020-11-05) - confirmed complete dump.
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Directory</th>
+                    <th>Dump Date</th>
+                    <th>file_rep</th>
+                    <th>domain_dns</th>
+                    <th>domain_classification</th>
+                    <th>Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr class="highlight">
+                    <td>Root (<code>/</code>) ✅</td>
+                    <td>2020-11-05</td>
+                    <td>5.19 TB</td>
+                    <td>3.85 TB</td>
+                    <td>446 GB</td>
+                    <td><strong>~9.5 TB</strong></td>
+                </tr>
+                <tr>
+                    <td><code>new/</code> ⚠️</td>
+                    <td>2020-11-26</td>
+                    <td>5.53 TB</td>
+                    <td>3.95 TB</td>
+                    <td>447 GB</td>
+                    <td><strong>~10 TB</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>Combined</strong></td>
+                    <td></td>
+                    <td>10.72 TB</td>
+                    <td>7.80 TB</td>
+                    <td>893 GB</td>
+                    <td><strong>~19.5 TB</strong></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="alert alert-info">
+            <strong>Note:</strong> <code>new/</code> directory contains <code>config/oplog.bson</code> and may be an <strong>incremental backup</strong> or <strong>incomplete dump</strong>. The local samples were downloaded from Root directory.
+        </div>
+
+        <h3>Per-Shard Comparison (file_rep.bson)</h3>
+        <table>
+            <thead>
+                <tr><th>Shard</th><th>Root (2020-11-05)</th><th>new/ (2020-11-26)</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>r01</td><td>853.3 GB</td><td>971.8 GB</td></tr>
+                <tr><td>r02</td><td>863.6 GB</td><td>937.9 GB</td></tr>
+                <tr><td>r03</td><td>924.5 GB</td><td>921.4 GB</td></tr>
+                <tr><td>r04</td><td>881.7 GB</td><td>952.1 GB</td></tr>
+                <tr><td>r05</td><td>962.9 GB</td><td>961.9 GB</td></tr>
+                <tr><td>r06</td><td>831.7 GB</td><td>920.2 GB</td></tr>
+                <tr class="highlight"><td><strong>Total</strong></td><td><strong>5.19 TB</strong></td><td><strong>5.53 TB</strong></td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="migration">Data Migration Estimate</h2>
+        
+        <div class="grid">
+            <div class="card">
+                <div class="stat-value">9.5 TB</div>
+                <div class="stat-label">Original MongoDB (Root)</div>
+            </div>
+            <div class="card">
+                <div class="stat-value">~950 GB</div>
+                <div class="stat-label">After Filter (response_code=1)</div>
+            </div>
+            <div class="card">
+                <div class="stat-value">~95 GB</div>
+                <div class="stat-label">After Filter (positives>0)</div>
+            </div>
+            <div class="card">
+                <div class="stat-value">~2 GB</div>
+                <div class="stat-label">Final Transfer (gzip)</div>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr><th>Stage</th><th>Data Size</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Original (Root directory)</td><td>~9.5 TB</td><td>Complete dump (2020-11-05)</td></tr>
+                <tr><td>After filtering (response_code=1)</td><td>~950 GB</td><td>~10% has VT data</td></tr>
+                <tr><td>After filtering (positives&gt;0)</td><td>~95 GB</td><td>~1% has detections</td></tr>
+                <tr><td>After field extraction</td><td>~9.5 GB</td><td>Remove scans details</td></tr>
+                <tr class="highlight"><td>After gzip compression</td><td><strong>~1-3 GB</strong></td><td>Final transfer size</td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="collections">Collection Summary</h2>
+        
+        <table>
+            <thead>
+                <tr><th>Collection</th><th>Purpose</th><th>Present in Shards</th><th>Data Scale</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>file_rep</code></td><td>File reputation (VT)</td><td>r01-r06</td><td><strong>~893 GB - 1 TB/shard</strong></td></tr>
+                <tr><td><code>domain_dns</code></td><td>Domain DNS records</td><td>r01-r06</td><td><strong>~675-729 GB/shard</strong></td></tr>
+                <tr><td><code>domain_classification</code></td><td>Domain classification (VT)</td><td>r01-r06</td><td><strong>~75-85 GB/shard</strong></td></tr>
+                <tr><td><code>TOKENS</code></td><td>Token classification data</td><td>r01</td><td>~890 KB</td></tr>
+                <tr><td><code>SINKHOLE_IDENTIFIERS</code></td><td>Sinkhole identifiers</td><td>r02</td><td>~456 KB</td></tr>
+                <tr><td><code>ENGINES</code></td><td>Engine configuration</td><td>r06</td><td>~181 KB</td></tr>
+                <tr><td><code>FILE_EXTENSION_CLASSIFICATION</code></td><td>File extension classification</td><td>r04</td><td>~105 KB</td></tr>
+                <tr><td><code>PRODUCT_CLASSIFICATION</code></td><td>Product classification</td><td>r05</td><td>~30 KB</td></tr>
+                <tr><td><code>FILE_CLASSIFICATION</code></td><td>File classification</td><td>r05</td><td>~22 KB</td></tr>
+                <tr><td><code>alerts</code></td><td>Alert records</td><td>r04</td><td>~6.8 MB</td></tr>
+                <tr><td><code>PORT_CLASSIFICATION</code></td><td>Port classification</td><td>r02</td><td>~1.7 MB</td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="tidb">TiDB Migration Details</h2>
+
+        <h3>Record Count Estimates</h3>
+        <table>
+            <thead>
+                <tr><th>Source</th><th>Original Size</th><th>Avg Record</th><th>Est. Total Records</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>file_rep</td><td>5.19 TB</td><td>~1,164 bytes</td><td><strong>~4.9 billion</strong></td></tr>
+                <tr><td>domain_classification</td><td>446 GB</td><td>~588 bytes</td><td><strong>~815 million</strong></td></tr>
+                <tr><td>TOKENS</td><td>890 KB</td><td>~350 bytes</td><td><strong>~2,538</strong></td></tr>
+                <tr><td>SINKHOLE_IDENTIFIERS</td><td>456 KB</td><td>~150 bytes</td><td><strong>~3,000</strong></td></tr>
+            </tbody>
+        </table>
+
+        <h3>After Filtering</h3>
+        <table>
+            <thead>
+                <tr><th>Source</th><th>Filter</th><th>Est. Records</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>file_rep</td><td><code>response_code=1</code></td><td>~490 million</td><td>10% has VT data</td></tr>
+                <tr><td>file_rep</td><td><code>positives&gt;0</code></td><td>~49 million</td><td>1% has detections</td></tr>
+                <tr><td>domain_classification</td><td>has detections</td><td>~80 million</td><td>~10% estimated</td></tr>
+                <tr><td>TOKENS</td><td>all</td><td>2,538</td><td>100% (small dataset)</td></tr>
+                <tr><td>SINKHOLE_IDENTIFIERS</td><td>all</td><td>~3,000</td><td>100% (small dataset)</td></tr>
+            </tbody>
+        </table>
+
+        <h3>TiDB Schema Row Sizes</h3>
+        <table>
+            <thead>
+                <tr><th>Table</th><th>Fields</th><th>Row Size</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>ioc_file_hashes</code></td><td>sha256(32) + sha1(20) + md5(16) + enum(1) + enum(1) + datetime(8)</td><td><strong>~88 bytes</strong></td></tr>
+                <tr><td><code>ioc_domains</code></td><td>domain(~30 avg) + enum(1) + enum(1) + datetime(8)</td><td><strong>~50 bytes</strong></td></tr>
+                <tr><td><code>ioc_ips</code></td><td>ip(16) + tinyint(1) + enum(1) + enum(1) + varchar(~30) + datetime(8)</td><td><strong>~70 bytes</strong></td></tr>
+                <tr><td><code>customer_ioc</code></td><td>bigint(8) + enum(1) + varchar(64) + enum(1) + varchar(~100) + datetime(8)</td><td><strong>~200 bytes</strong></td></tr>
+            </tbody>
+        </table>
+
+        <h3>Strategy A: Malicious Only (positives > 0) ✅ Recommended</h3>
+        <table>
+            <thead>
+                <tr><th>TiDB Table</th><th>Source</th><th>Records</th><th>Row Size</th><th>Data Size</th><th>With Index</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>ioc_file_hashes</code></td><td>file_rep</td><td>49M</td><td>88 bytes</td><td><strong>4.3 GB</strong></td><td>~6 GB</td></tr>
+                <tr><td><code>ioc_domains</code></td><td>domain_classification</td><td>80M</td><td>50 bytes</td><td><strong>4.0 GB</strong></td><td>~6 GB</td></tr>
+                <tr><td><code>ioc_ips</code></td><td>SINKHOLE_IDENTIFIERS</td><td>3K</td><td>70 bytes</td><td><strong>0.2 MB</strong></td><td>~0.5 MB</td></tr>
+                <tr><td><code>ioc_file_hashes</code></td><td>TOKENS (hashes)</td><td>~2K</td><td>88 bytes</td><td><strong>0.2 MB</strong></td><td>~0.5 MB</td></tr>
+                <tr><td><code>ioc_domains</code></td><td>TOKENS (domains)</td><td>~500</td><td>50 bytes</td><td><strong>25 KB</strong></td><td>~50 KB</td></tr>
+                <tr class="highlight"><td><strong>Total</strong></td><td></td><td></td><td></td><td><strong>~8.3 GB</strong></td><td><strong>~12 GB</strong></td></tr>
+            </tbody>
+        </table>
+
+        <h3>Strategy B: All VT Data (response_code = 1)</h3>
+        <table>
+            <thead>
+                <tr><th>TiDB Table</th><th>Source</th><th>Records</th><th>Row Size</th><th>Data Size</th><th>With Index</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>ioc_file_hashes</code></td><td>file_rep</td><td>490M</td><td>88 bytes</td><td><strong>43 GB</strong></td><td>~65 GB</td></tr>
+                <tr><td><code>ioc_domains</code></td><td>domain_classification</td><td>245M</td><td>50 bytes</td><td><strong>12 GB</strong></td><td>~18 GB</td></tr>
+                <tr><td><code>ioc_ips</code></td><td>SINKHOLE_IDENTIFIERS</td><td>3K</td><td>70 bytes</td><td><strong>0.2 MB</strong></td><td>~0.5 MB</td></tr>
+                <tr class="highlight"><td><strong>Total</strong></td><td></td><td></td><td></td><td><strong>~55 GB</strong></td><td><strong>~83 GB</strong></td></tr>
+            </tbody>
+        </table>
+
+        <h3>Transfer File Sizes</h3>
+        <table>
+            <thead>
+                <tr><th>Strategy</th><th>Data for Transfer</th><th>gzip Compressed</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+                <tr class="highlight"><td><strong>A: Malicious Only</strong></td><td>~8 GB NDJSON</td><td><strong>~2 GB</strong></td><td>✅ Recommended</td></tr>
+                <tr><td>B: All VT Data</td><td>~55 GB NDJSON</td><td><strong>~15 GB</strong></td><td>Complete VT data</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Compression Summary</h3>
+        <div class="flow-chart">
+Original MongoDB (Root):     9.5 TB (100%)
+    ↓ Filter response_code=0
+Valid VT Data:               ~950 GB (10%)
+    ↓ Filter positives=0
+Malicious Only:              ~95 GB (1%)
+    ↓ Extract to TiDB schema
+TiDB Row Format:             ~8 GB (0.08%)
+    ↓ gzip for transfer
+Transfer File:               ~2 GB (0.02%)
+        </div>
+
+        <h2 id="commands">Verification Commands</h2>
+        
+        <pre><code># Login to GCS
+gcloud auth login
+
+# Compare root vs new/ directory
+gsutil ls -l gs://sage_prod_dump/cr-mongo-shard-r01.cybereason.net/cybereason/file_rep.bson
+gsutil ls -l gs://sage_prod_dump/new/cr-mongo-shard-r01.cybereason.net/cybereason/file_rep.bson
+
+# Calculate total size
+for shard in r01 r02 r03 r04 r05 r06; do
+    gsutil ls -l "gs://sage_prod_dump/new/cr-mongo-shard-${shard}.cybereason.net/cybereason/file_rep.bson"
+done</code></pre>
+
+        <h2>GCS Path Mapping</h2>
+        <pre><code>gs://sage_prod_dump/                              # Total: ~19.5 TB
+│
+├── cr-mongo-shard-r01.cybereason.net/           ─┐
+│   └── cybereason/                               │
+│       ├── *.bson                                │
+│       └── *.metadata.json                       │
+├── cr-mongo-shard-r02.cybereason.net/            │
+│   └── cybereason/                               ├── COMPLETE DUMP (2020-11-05)
+├── cr-mongo-shard-r03.cybereason.net/            │   ~9.5 TB ✅ RECOMMENDED
+│   └── cybereason/                               │   (local samples from here)
+├── cr-mongo-shard-r04.cybereason.net/            │
+│   └── cybereason/                               │
+├── cr-mongo-shard-r05.cybereason.net/            │
+│   └── cybereason/                               │
+├── cr-mongo-shard-r06.cybereason.net/           ─┘
+│   └── cybereason/
+│
+└── new/                                         ─┐
+    ├── config/                                   │  ⚠️ Contains oplog.bson
+    │   ├── oplog.bson                            │  May be incremental backup
+    │   ├── admin/                                │  or incomplete dump
+    │   └── config/                               │
+    ├── cr-mongo-shard-r01.cybereason.net/        ├── POSSIBLY INCOMPLETE (2020-11-26)
+    │   └── cybereason/                           │   ~10 TB
+    └── ...                                      ─┘</code></pre>
+
+        <hr style="margin: 2rem 0;">
+        <p style="color: var(--text-muted); text-align: center;">
+            Generated: 2026-01-26 | Sage MongoDB Production Dump Index
+        </p>
+    </div>
+</body>
+</html>

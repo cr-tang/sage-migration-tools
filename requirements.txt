@@ -1,0 +1,11 @@
+# Requirements for parallel_bson_processor.py
+# 
+# Install with: pip install -r requirements.txt
+# Or install individually:
+#   pip install pymongo google-cloud-storage
+
+# BSON parsing (required for processing .bson files)
+pymongo>=4.0.0
+
+# Google Cloud Storage client (required for GCS access)
+google-cloud-storage>=2.0.0
