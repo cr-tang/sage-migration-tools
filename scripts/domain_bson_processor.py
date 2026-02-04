@@ -539,39 +539,69 @@ def main():
                         help='Chunk size in MB (default: 256)')
     parser.add_argument('--resume', action='store_true',
                         help='Resume from checkpoint')
+    parser.add_argument('--all', action='store_true',
+                        help='Process all shards (r01-r06)')
     
     args = parser.parse_args()
     
-    # Determine input/output files
-    # GCS path: gs://sage_prod_dump/cr-mongo-shard-{shard}.cybereason.net/cybereason/domain_classification.bson
-    if args.shard:
-        input_file = f'gs://sage_prod_dump/cr-mongo-shard-{args.shard}.cybereason.net/cybereason/domain_classification.bson'
-        output_file = f'domain_classification_{args.shard}.ndjson.gz'
-        log_file = f'domain_processor_{args.shard}.log'
+    # Determine which shards to process
+    ALL_SHARDS = ['r01', 'r02', 'r03', 'r04', 'r05', 'r06']
+    
+    if args.all:
+        shards_to_process = ALL_SHARDS
+    elif args.shard:
+        shards_to_process = [args.shard]
     elif args.input_file:
+        shards_to_process = None  # Use custom input file
+    else:
+        # Default: process all shards
+        shards_to_process = ALL_SHARDS
+        print(f"No shard specified, processing all shards: {shards_to_process}")
+    
+    # Process custom input file
+    if shards_to_process is None:
         input_file = args.input_file
         output_file = args.output_file or 'domain_classification.ndjson.gz'
         log_file = args.log_file
-    else:
-        parser.error('Either --shard or --input-file is required')
-        return 1
+        
+        processor = ParallelDomainProcessor(
+            input_file=input_file,
+            output_file=output_file,
+            log_file=log_file,
+            num_workers=args.workers,
+            chunk_size=args.chunk_size * 1024 * 1024
+        )
+        processor.run(resume=args.resume)
+        return 0
     
-    # Override with explicit args
-    if args.output_file:
-        output_file = args.output_file
-    if args.log_file:
-        log_file = args.log_file
+    # Process shards
+    for shard in shards_to_process:
+        print(f"\n{'='*60}")
+        print(f"Processing shard: {shard}")
+        print(f"{'='*60}\n")
+        
+        # GCS path: gs://sage_prod_dump/cr-mongo-shard-{shard}.cybereason.net/cybereason/domain_classification.bson
+        input_file = f'gs://sage_prod_dump/cr-mongo-shard-{shard}.cybereason.net/cybereason/domain_classification.bson'
+        output_file = f'domain_classification_{shard}.ndjson.gz'
+        log_file = f'domain_processor_{shard}.log'
+        
+        # Override with explicit args (only for single shard)
+        if len(shards_to_process) == 1:
+            if args.output_file:
+                output_file = args.output_file
+            if args.log_file:
+                log_file = args.log_file
+        
+        processor = ParallelDomainProcessor(
+            input_file=input_file,
+            output_file=output_file,
+            log_file=log_file,
+            num_workers=args.workers,
+            chunk_size=args.chunk_size * 1024 * 1024
+        )
+        
+        processor.run(resume=args.resume)
     
-    # Run processor
-    processor = ParallelDomainProcessor(
-        input_file=input_file,
-        output_file=output_file,
-        log_file=log_file,
-        num_workers=args.workers,
-        chunk_size=args.chunk_size * 1024 * 1024
-    )
-    
-    processor.run(resume=args.resume)
     return 0
 
 
