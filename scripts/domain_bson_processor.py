@@ -543,8 +543,9 @@ def main():
     args = parser.parse_args()
     
     # Determine input/output files
+    # GCS path: gs://sage_prod_dump/cr-mongo-shard-{shard}.cybereason.net/cybereason/domain_classification.bson
     if args.shard:
-        input_file = f'gs://sage_prod_dump/{args.shard}/cybereason/domain_classification.bson'
+        input_file = f'gs://sage_prod_dump/cr-mongo-shard-{args.shard}.cybereason.net/cybereason/domain_classification.bson'
         output_file = f'domain_classification_{args.shard}.ndjson.gz'
         log_file = f'domain_processor_{args.shard}.log'
     elif args.input_file:
