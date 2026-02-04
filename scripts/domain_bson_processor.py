@@ -99,6 +99,11 @@ class ProcessingStats:
     filtered_indifferent: int = 0
     decode_errors: int = 0
     bytes_read: int = 0
+    # Classification breakdown
+    malware_count: int = 0
+    av_detected_count: int = 0
+    whitelist_count: int = 0
+    other_count: int = 0
 
 
 @dataclass
@@ -247,6 +252,7 @@ class DomainProcessor:
     def __init__(self, logger):
         self.logger = logger
         self.stats = ProcessingStats()
+        self._lock = threading.Lock()  # Thread-safe stats updates
     
     def process_chunk(self, data: bytes, offset: int = 0) -> Tuple[List[bytes], int]:
         """
@@ -271,25 +277,28 @@ class DomainProcessor:
             try:
                 doc_data = data[pos:pos+doc_len]
                 doc = bson.decode(doc_data)
-                self.stats.total_docs += 1
                 
                 # Filter and extract
                 result = filter_and_extract(doc)
                 
-                if result is None:
-                    # Track why we filtered
-                    response = doc.get('response', '')
-                    classification = extract_classification(response)
-                    if classification == 'unknown':
-                        self.stats.filtered_unknown += 1
-                    elif classification == 'indifferent':
-                        self.stats.filtered_indifferent += 1
-                else:
-                    output_lines.append(to_ndjson_line(result))
-                    self.stats.valid_docs += 1
+                # Thread-safe stats update
+                with self._lock:
+                    self.stats.total_docs += 1
+                    if result is None:
+                        # Track why we filtered
+                        response = doc.get('response', '')
+                        classification = extract_classification(response)
+                        if classification == 'unknown':
+                            self.stats.filtered_unknown += 1
+                        elif classification == 'indifferent':
+                            self.stats.filtered_indifferent += 1
+                    else:
+                        output_lines.append(to_ndjson_line(result))
+                        self.stats.valid_docs += 1
                 
             except Exception as e:
-                self.stats.decode_errors += 1
+                with self._lock:
+                    self.stats.decode_errors += 1
                 self.logger.debug(f"Decode error at pos {pos}: {e}")
             
             pos += doc_len
@@ -370,15 +379,37 @@ class ParallelDomainProcessor:
     
     def writer_thread(self, output_file: str):
         """Background thread to write output."""
-        with gzip.open(output_file, 'ab') as f:
+        # Use 'wb' mode to create fresh file each run
+        with gzip.open(output_file, 'wb') as f:
+            batch = []
+            batch_size = 0
+            FLUSH_THRESHOLD = 1024 * 1024  # 1MB
+            
             while not self.shutdown_flag.is_set():
                 try:
                     data = self.output_queue.get(timeout=1.0)
                     if data is None:
+                        # Flush remaining data
+                        if batch:
+                            f.write(b''.join(batch))
                         break
-                    f.write(data)
+                    batch.append(data)
+                    batch_size += len(data)
                     self.bytes_written += len(data)
+                    
+                    # Batch write for efficiency
+                    if batch_size >= FLUSH_THRESHOLD:
+                        f.write(b''.join(batch))
+                        f.flush()
+                        batch = []
+                        batch_size = 0
                 except queue.Empty:
+                    # Flush any pending data
+                    if batch:
+                        f.write(b''.join(batch))
+                        f.flush()
+                        batch = []
+                        batch_size = 0
                     continue
     
     def process_range(self, range_info: RangeInfo) -> Tuple[int, int, List[bytes]]:
