@@ -320,11 +320,13 @@ class ParallelDomainProcessor:
         log_file: Optional[str] = None,
         num_workers: int = 20,
         chunk_size: int = 256 * 1024 * 1024,  # 256MB chunks
+        append_mode: bool = False,  # Append to existing output file
     ):
         self.input_file = input_file
         self.output_file = output_file
         self.num_workers = num_workers
         self.chunk_size = chunk_size
+        self.append_mode = append_mode
         self.checkpoint_file = output_file + '.checkpoint'
         
         self.logger = setup_logging(log_file, 'domain_processor')
@@ -379,8 +381,9 @@ class ParallelDomainProcessor:
     
     def writer_thread(self, output_file: str):
         """Background thread to write output."""
-        # Use 'wb' mode to create fresh file each run
-        with gzip.open(output_file, 'wb') as f:
+        # Use 'ab' for append mode, 'wb' for fresh file
+        mode = 'ab' if self.append_mode else 'wb'
+        with gzip.open(output_file, mode) as f:
             batch = []
             batch_size = 0
             FLUSH_THRESHOLD = 1024 * 1024  # 1MB
@@ -606,22 +609,37 @@ def main():
         return 0
     
     # Process shards
-    for shard in shards_to_process:
-        print(f"\n{'='*60}")
-        print(f"Processing shard: {shard}")
-        print(f"{'='*60}\n")
+    # For multiple shards, merge into one output file
+    if len(shards_to_process) > 1:
+        output_file = args.output_file or 'domain_classification_all.ndjson.gz'
+        log_file = args.log_file or 'domain_processor_all.log'
         
-        # GCS path: gs://sage_prod_dump/cr-mongo-shard-{shard}.cybereason.net/cybereason/domain_classification.bson
+        print(f"Processing {len(shards_to_process)} shards into: {output_file}")
+        
+        # Process each shard and append to the same output
+        for i, shard in enumerate(shards_to_process):
+            print(f"\n{'='*60}")
+            print(f"Processing shard {i+1}/{len(shards_to_process)}: {shard}")
+            print(f"{'='*60}\n")
+            
+            input_file = f'gs://sage_prod_dump/cr-mongo-shard-{shard}.cybereason.net/cybereason/domain_classification.bson'
+            
+            processor = ParallelDomainProcessor(
+                input_file=input_file,
+                output_file=output_file,
+                log_file=log_file,
+                num_workers=args.workers,
+                chunk_size=args.chunk_size * 1024 * 1024,
+                append_mode=(i > 0)  # Append after first shard
+            )
+            
+            processor.run(resume=args.resume)
+    else:
+        # Single shard
+        shard = shards_to_process[0]
         input_file = f'gs://sage_prod_dump/cr-mongo-shard-{shard}.cybereason.net/cybereason/domain_classification.bson'
-        output_file = f'domain_classification_{shard}.ndjson.gz'
-        log_file = f'domain_processor_{shard}.log'
-        
-        # Override with explicit args (only for single shard)
-        if len(shards_to_process) == 1:
-            if args.output_file:
-                output_file = args.output_file
-            if args.log_file:
-                log_file = args.log_file
+        output_file = args.output_file or f'domain_classification_{shard}.ndjson.gz'
+        log_file = args.log_file or f'domain_processor_{shard}.log'
         
         processor = ParallelDomainProcessor(
             input_file=input_file,
