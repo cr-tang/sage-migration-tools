@@ -161,7 +161,7 @@
 <body>
     <div class="container">
         <h1>Phoenix Flink TI Enrichment</h1>
-        <p class="subtitle">Data Migration Status | Last Updated: 2026-02-03</p>
+        <p class="subtitle">Data Migration Status | Last Updated: 2026-02-03 (IPv4 TOKENS added)</p>
 
         <!-- Executive Summary -->
         <h2>1. Executive Summary</h2>
@@ -180,7 +180,7 @@
                 <div class="summary-label">In Progress</div>
             </div>
             <div class="summary-item">
-                <div class="summary-number">2</div>
+                <div class="summary-number">3</div>
                 <div class="summary-label">Pending</div>
             </div>
         </div>
@@ -209,23 +209,23 @@
                     <tr>
                         <td><code>ioc_tokens</code></td>
                         <td>MongoDB TOKENS</td>
-                        <td>~2,500</td>
+                        <td>~2,537</td>
                         <td><span class="status-done">Done</span></td>
-                        <td>Internal threat intel</td>
+                        <td>All types: DOMAIN, SHA1, MD5, SHA256, IPv4</td>
                         <td>—</td>
                         <td>Manually maintained<br><code>Sage: /download_v1/tokens</code></td>
                     </tr>
                     <tr>
                         <td><code>ioc_file_hashes</code></td>
-                        <td>MongoDB file_rep</td>
-                        <td>~1M</td>
+                        <td>MongoDB file_rep + VT Feeder</td>
+                        <td>~1M+</td>
                         <td><span class="status-progress">In Progress</span></td>
-                        <td>r06 tested, others pending</td>
+                        <td>Step 1: MongoDB import<br>Step 2: VT Feeder update</td>
                         <td style="color: #dc2626;">Some records missing classification</td>
                         <td>
+                            <strong>Step 2 Update:</strong><br>
                             <code>GCS: vt-file-feeder/latest-reports/{sha1}</code><br>
-                            <code>GCS: broccoli-enricher/latest-reports/{sha1}</code><br>
-                            <code>VT API: POST /vtapi/v2/file/report</code>
+                            <code>GCS: broccoli-enricher/latest-reports/{sha1}</code>
                         </td>
                     </tr>
                     <tr>
@@ -242,12 +242,12 @@
                     </tr>
                     <tr>
                         <td><code>ioc_ips</code></td>
-                        <td>TOKENS (IPv4 entries only)</td>
-                        <td>~50</td>
+                        <td>TOKENS (IPv4 entries in ioc_tokens)</td>
+                        <td>~1,363</td>
                         <td><span class="status-done">Done</span></td>
-                        <td>Via TOKENS import</td>
+                        <td>Lookup via TokensCache (in-memory)</td>
                         <td>—</td>
-                        <td>Manually maintained via TOKENS<br><small>Note: SINKHOLED IPs not imported (not treated as blacklisted)</small></td>
+                        <td>Via ioc_tokens table<br><small>Note: SINKHOLED IPs not imported (not treated as blacklisted)</small></td>
                     </tr>
                     <tr>
                         <td><code>file_extension_classification</code></td>
@@ -381,14 +381,29 @@
                 </thead>
                 <tbody>
                     <tr>
-                        <td>Process remaining 5 file_rep shards</td>
+                        <td><strong>File Hash Step 1:</strong> Process remaining 5 file_rep shards (MongoDB)</td>
                         <td><span class="risk-high">High</span></td>
                         <td>-</td>
                     </tr>
                     <tr>
-                        <td>Import file_rep to TiDB</td>
+                        <td><strong>File Hash Step 1:</strong> Import file_rep to TiDB</td>
                         <td><span class="risk-high">High</span></td>
                         <td>Shard processing</td>
+                    </tr>
+                    <tr>
+                        <td><strong>File Hash Step 2:</strong> Update with VT Feeder latest data (GCS)</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                        <td>Step 1 complete</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Domain:</strong> Process domain_classification (MongoDB)</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                        <td>-</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Domain:</strong> Import to TiDB ioc_domains</td>
+                        <td><span class="risk-medium">Medium</span></td>
+                        <td>Domain processing</td>
                     </tr>
                     <tr>
                         <td><s>Import SINKHOLE_IDENTIFIERS to ioc_ips</s></td>
@@ -398,12 +413,7 @@
                     <tr>
                         <td>IP entries from TOKENS</td>
                         <td><span class="status-done">Done</span></td>
-                        <td>Imported via TOKENS migration</td>
-                    </tr>
-                    <tr>
-                        <td>Domain processing script</td>
-                        <td><span class="risk-low">Low</span></td>
-                        <td>-</td>
+                        <td>1,363 IPv4 in ioc_tokens (TokensCache)</td>
                     </tr>
                 </tbody>
             </table>
@@ -521,14 +531,19 @@
 │   Flink Query (SHA1/MD5/SHA256)                                                │
 │                                                                                 │
 ├─────────────────────────────────────────────────────────────────────────────────┤
-│  MIGRATION PLAN                                                                 │
+│  MIGRATION PLAN (Two Steps)                                                     │
 │                                                                                 │
+│   Step 1: Historical Import (MongoDB)                                          │
 │   MongoDB file_rep (5.6 TB) ──▶ parallel_bson_processor.py ──▶ TiDB           │
-│                                                                                 │
 │   • Filter: response_code=1 AND classification NOT IN (indifferent, unknown)   │
-│   • Keep: Full value object (for future Broccoli re-classification)            │
-│   • Output: ~1M records, ~1.5 GB compressed                                    │
-│   • Status: r06 done, r01-r05 pending (~25 hours total)                        │
+│   • Output: ~1M records (baseline)                                             │
+│   • Status: r06 done, r01-r05 pending                                          │
+│                                                                                 │
+│   Step 2: Fresh Data Update (VT Feeder GCS)                                    │
+│   GCS vt-file-feeder/latest-reports/{sha1} ──▶ [update script] ──▶ TiDB       │
+│   • Upsert: Update existing records with latest classification                 │
+│   • Add: New hashes not in MongoDB snapshot                                    │
+│   • Status: Pending (after Step 1)                                             │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘</pre>
         </div>

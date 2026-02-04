@@ -153,6 +153,8 @@ def normalize_classification(classification: str) -> str:
         'blacklist': 'BLACKLIST',
         'sinkholed': 'SINKHOLED',
         'unresolved': 'UNRESOLVED',
+        'av_detected': 'AV_DETECTED',  # indifferent domains with positive detections
+        'indifferent': 'INDIFFERENT',
     }
     return mapping.get(classification.lower(), 'MALWARE')
 
