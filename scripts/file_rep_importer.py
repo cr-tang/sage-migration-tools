@@ -47,6 +47,16 @@ SKIP_CLASSIFICATIONS = {"indifferent", "unknown", "whitelist"}
 
 DEFAULT_SOURCE = "VIRUS_TOTAL"
 
+# Skip reason tracking
+class SkipReason:
+    NO_SHA256 = "no_sha256"
+    WHITELIST = "whitelist"
+    INDIFFERENT = "indifferent"
+    UNKNOWN = "unknown"
+    NO_THREAT = "no_threat_indicators"
+    DUPLICATE = "duplicate"
+    INVALID_JSON = "invalid_json"
+
 # Batch size for inserts
 DEFAULT_BATCH_SIZE = 1000
 
@@ -118,29 +128,43 @@ def infer_classification(classification: Optional[str], detections: Optional[str
     return None  # No threat indicators, skip
 
 
-def transform_record(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Transform a record from NDJSON format to TiDB format."""
+def transform_record(record: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Transform a record from NDJSON format to TiDB format.
+    Returns (transformed_record, skip_reason) - skip_reason is None if record is valid.
+    """
     sha256 = record.get("sha256")
     sha1 = record.get("sha1")
     md5 = record.get("md5")
     
     # Skip records without sha256 (primary key)
     if not sha256:
-        return None
+        return None, SkipReason.NO_SHA256
     
     positives = record.get("positives", 0)
     if isinstance(positives, float):
         positives = int(positives)
     
+    # Check classification for skip reason
+    orig_classification = record.get("classification")
+    if orig_classification:
+        orig_lower = orig_classification.lower()
+        if orig_lower == "whitelist":
+            return None, SkipReason.WHITELIST
+        if orig_lower == "indifferent":
+            return None, SkipReason.INDIFFERENT
+        if orig_lower == "unknown":
+            return None, SkipReason.UNKNOWN
+    
     classification = infer_classification(
-        record.get("classification"),
+        orig_classification,
         record.get("detections"),
         positives
     )
     
     # Skip records without valid classification
     if not classification:
-        return None
+        return None, SkipReason.NO_THREAT
     
     return {
         "sha256": hex_to_bytes(sha256),
@@ -149,7 +173,7 @@ def transform_record(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "classification": classification,
         "source": DEFAULT_SOURCE,
         "detection_names": record.get("detections"),  # Keep original format: "engine:result;..."
-    }
+    }, None
 
 
 # ----------------------------
@@ -280,10 +304,10 @@ def import_file(
     batch_size: int,
     resume: bool,
     logger: logging.Logger,
-) -> Tuple[int, int, int]:
+) -> Tuple[int, int, int, Dict[str, int]]:
     """
     Import a single NDJSON.gz file into TiDB.
-    Returns (lines_processed, records_imported, records_skipped).
+    Returns (lines_processed, records_imported, records_skipped, skip_reasons).
     """
     checkpoint_file = input_file + ".import_checkpoint"
     checkpoint = load_checkpoint(checkpoint_file) if resume else None
@@ -291,6 +315,7 @@ def import_file(
     start_line = 0
     total_imported = 0
     total_skipped = 0
+    skip_reasons: Dict[str, int] = {}
     
     if checkpoint and checkpoint.input_file == input_file:
         start_line = checkpoint.lines_processed
@@ -313,17 +338,21 @@ def import_file(
             
             try:
                 record = json.loads(line.strip())
-                transformed = transform_record(record)
+                transformed, skip_reason = transform_record(record)
                 
                 if transformed:
                     batch.append(transformed)
                 else:
                     total_skipped += 1
+                    if skip_reason:
+                        skip_reasons[skip_reason] = skip_reasons.get(skip_reason, 0) + 1
                 
                 # Batch insert
                 if len(batch) >= batch_size:
                     inserted, skipped = importer.batch_insert(batch)
                     total_imported += inserted
+                    if skipped > 0:
+                        skip_reasons[SkipReason.DUPLICATE] = skip_reasons.get(SkipReason.DUPLICATE, 0) + skipped
                     total_skipped += skipped
                     batch = []
                     
@@ -354,11 +383,14 @@ def import_file(
             except json.JSONDecodeError as e:
                 logger.warning(f"Invalid JSON at line {line_num + 1}: {e}")
                 total_skipped += 1
+                skip_reasons[SkipReason.INVALID_JSON] = skip_reasons.get(SkipReason.INVALID_JSON, 0) + 1
     
     # Final batch
     if batch:
         inserted, skipped = importer.batch_insert(batch)
         total_imported += inserted
+        if skipped > 0:
+            skip_reasons[SkipReason.DUPLICATE] = skip_reasons.get(SkipReason.DUPLICATE, 0) + skipped
         total_skipped += skipped
     
     # Final checkpoint
@@ -373,7 +405,7 @@ def import_file(
         checkpoint_file,
     )
     
-    return lines_processed, total_imported, total_skipped
+    return lines_processed, total_imported, total_skipped, skip_reasons
 
 
 def main():
@@ -439,16 +471,27 @@ def main():
     total_lines = 0
     total_imported = 0
     total_skipped = 0
+    all_skip_reasons: Dict[str, int] = {}
     start_time = time.time()
     
     for input_file in input_files:
         logger.info(f"========== Importing: {input_file} ==========")
-        lines, imported, skipped = import_file(
+        lines, imported, skipped, skip_reasons = import_file(
             importer, input_file, args.batch_size, args.resume, logger
         )
         total_lines += lines
         total_imported += imported
         total_skipped += skipped
+        
+        # Merge skip reasons
+        for reason, count in skip_reasons.items():
+            all_skip_reasons[reason] = all_skip_reasons.get(reason, 0) + count
+        
+        # Log skip reasons for this file
+        if skip_reasons:
+            reasons_str = ", ".join(f"{k}: {v:,}" for k, v in sorted(skip_reasons.items(), key=lambda x: -x[1]))
+            logger.info(f"Skip reasons: {reasons_str}")
+        
         logger.info(f"File complete: {lines:,} lines, {imported:,} imported, {skipped:,} skipped")
     
     # Summary
@@ -459,6 +502,13 @@ def main():
     logger.info(f"Total lines: {total_lines:,}")
     logger.info(f"Total imported: {total_imported:,}")
     logger.info(f"Total skipped: {total_skipped:,}")
+    
+    # Log overall skip reasons
+    if all_skip_reasons:
+        logger.info("Skip reasons breakdown:")
+        for reason, count in sorted(all_skip_reasons.items(), key=lambda x: -x[1]):
+            logger.info(f"  {reason}: {count:,}")
+    
     logger.info(f"Time: {elapsed/60:.1f} minutes")
     logger.info(f"Final record count: {final_count:,} (added {final_count - initial_count:,})")
 
