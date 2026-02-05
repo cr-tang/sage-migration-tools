@@ -128,6 +128,35 @@ def infer_classification(classification: Optional[str], detections: Optional[str
     return None  # No threat indicators, skip
 
 
+def extract_detection_names(record: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract detection names from record.
+    
+    Priority:
+    1. Use 'detections' field if already present (pre-processed)
+    2. Extract from 'scans' field (raw VT API response format)
+    
+    Returns semicolon-separated string: "engine:result;engine:result;..."
+    """
+    # Check if already has detections field
+    if record.get("detections"):
+        return record["detections"]
+    
+    # Extract from scans field
+    scans = record.get("scans")
+    if not scans or not isinstance(scans, dict):
+        return None
+    
+    detections = []
+    for engine, result in scans.items():
+        if isinstance(result, dict) and result.get("detected") and result.get("result"):
+            detections.append(f"{engine}:{result['result']}")
+    
+    if detections:
+        return ";".join(detections)
+    return None
+
+
 def transform_record(record: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Transform a record from NDJSON format to TiDB format.
@@ -156,9 +185,12 @@ def transform_record(record: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], 
         if orig_lower == "unknown":
             return None, SkipReason.UNKNOWN
     
+    # Extract detection names from scans or detections field
+    detection_names = extract_detection_names(record)
+    
     classification = infer_classification(
         orig_classification,
-        record.get("detections"),
+        detection_names,
         positives
     )
     
@@ -172,7 +204,7 @@ def transform_record(record: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], 
         "md5": hex_to_bytes(md5),
         "classification": classification,
         "source": DEFAULT_SOURCE,
-        "detection_names": record.get("detections"),  # Keep original format: "engine:result;..."
+        "detection_names": detection_names,
     }, None
 
 
