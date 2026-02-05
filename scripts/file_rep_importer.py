@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TiDB Importer - Import processed NDJSON.gz files into TiDB ioc_file_hashes table.
+File Rep Importer - Import processed file_rep NDJSON.gz files into ioc_file_hashes table.
 
 Features:
 - Reads gzipped NDJSON files from BSON processor output
@@ -10,9 +10,9 @@ Features:
 - Progress logging and resume support via checkpoint
 
 Usage:
-    python3 tidb_importer.py --input file_rep_r06.ndjson.gz
-    python3 tidb_importer.py --input "file_rep_*.ndjson.gz" --batch-size 5000
-    python3 tidb_importer.py --input file_rep_r01.ndjson.gz --resume
+    python3 file_rep_importer.py --input file_rep_r06.ndjson.gz
+    python3 file_rep_importer.py --input "file_rep_*.ndjson.gz" --batch-size 5000
+    python3 file_rep_importer.py --input file_rep_r01.ndjson.gz --resume
 """
 import gzip
 import json
@@ -390,8 +390,8 @@ def main():
     args = parser.parse_args()
     
     # Setup logging
-    logger = setup_logging("tidb_importer.log")
-    logger.info(f"Starting TiDB importer")
+    logger = setup_logging("file_rep_importer.log")
+    logger.info(f"Starting File Rep importer")
     logger.info(f"Input pattern: {args.input}")
     
     # Find input files
