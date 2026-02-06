@@ -1,11 +1,8 @@
-# Requirements for parallel_bson_processor.py
-# 
-# Install with: pip install -r requirements.txt
-# Or install individually:
-#   pip install pymongo google-cloud-storage
+# VT Feeder Importer - Python Dependencies
 
-# BSON parsing (required for processing .bson files)
-pymongo>=4.0.0
+# Required dependencies
+google-cloud-storage>=2.10.0    # GCS SDK for fast downloads
+mysql-connector-python>=8.0.0   # MySQL database driver
 
-# Google Cloud Storage client (required for GCS access)
-google-cloud-storage>=2.0.0
+# Recommended dependencies (optional but strongly recommended)
+orjson>=3.9.0                   # Fast JSON parser (2-3x faster than standard json)

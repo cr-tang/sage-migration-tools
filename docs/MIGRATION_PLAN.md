@@ -1,124 +1,245 @@
----
-name: TI Data Migration Completion
-overview: Complete the pending TI data migrations using MongoDB dump as baseline, with VT Feeder for future updates on file hashes. Internal data updates are deferred.
-todos:
-  - id: setup-repo
-    content: Move scripts and docs to sage-migration-tools repo
-    status: completed
-  - id: file-hashes-processing
-    content: Run parallel_bson_processor.py for all shards (r01-r06) on phoenix-vt-feeder
-    status: in_progress
-  - id: file-hashes-import
-    content: Import processed file_rep NDJSON to TiDB ioc_file_hashes
-    status: pending
-  - id: domain-processing
-    content: Run domain_bson_processor.py for domain_classification
-    status: pending
-  - id: domain-import
-    content: Import processed domains to TiDB ioc_domains
-    status: pending
-isProject: false
+# TI Data Migration Plan
+
+> See also: [Confluence Status Page](https://cybereason.atlassian.net/wiki/spaces/CE/pages/32394936365/Phoenix+Flink+TI+Enrichment+Data+Migration+Status)
+
+## Overview
+
+Migrate file hash reputation data from Sage MongoDB to Phoenix TiDB, with three distinct steps:
+
+1. **Download** - Download and process BSON dumps from MongoDB snapshot
+2. **Import** - Import processed NDJSON to TiDB
+3. **GCS Update** - Update/enrich data using live GCS sources (vt-file-feeder-by-date + broccoli-enricher)
+
 ---
 
-# TI Data Migration Completion Plan
+## File Rep Migration: Three Steps
 
-## Current Status (Updated 2026-02-03)
+### Step 1: Download ✅ COMPLETE
 
-| Table                           | Status       | Notes                                    |
-| ------------------------------- | ------------ | ---------------------------------------- |
-| `ioc_tokens`                    | ✅ Done      | ~2,500 records                           |
-| `file_extension_classification` | ✅ Done      | ~337 records                             |
-| `ioc_ips`                       | ✅ Done      | Via TOKENS (IPv4 entries only)           |
-| `customer_ioc`                  | ✅ Schema Ready | Runtime populated via API             |
-| `ioc_file_hashes`               | 🔄 In Progress | Processing r01-r06 shards              |
-| `ioc_domains`                   | ⏳ Pending   | Script ready, not started yet            |
+Download and process MongoDB BSON dumps into NDJSON format.
 
-**Note:** SINKHOLE_IDENTIFIERS is NOT imported - per rule team, SINKHOLED IPs are "a diversion from blacklisted", not treated as blacklisted.
+| Source | Location | Status |
+|--------|----------|--------|
+| file_rep (6 shards) | `gs://sage_prod_dump/cr-mongo-shard-{r01-r06}.cybereason.net/sage/file_rep.bson` | ✅ Downloaded |
 
-## Data Source Strategy
-
-```
-Baseline: MongoDB Dump (2020-11-05)
-├── file_rep              → ioc_file_hashes (In Progress)
-├── domain_classification → ioc_domains (Pending)
-└── TOKENS (IPv4 entries) → ioc_ips (Done via TOKENS import)
-
-Future Updates:
-├── File Hashes: VT Feeder GCS (vt-file-feeder/latest-reports/{sha1})
-├── Domains: VT Lookup API (no GCS cache, consider on-demand + cache)
-└── IPs: Manually maintained via TOKENS
+**Processing**:
+```bash
+# Process BSON → NDJSON (per shard)
+python parallel_bson_processor.py \
+  --input-file gs://sage_prod_dump/new/cr-mongo-shard-r01.cybereason.net/cybereason/file_rep.bson \
+  --output-file /data/ti-import/file_rep/file_rep_r01.ndjson.gz
 ```
 
-## Phase 1: ioc_file_hashes (In Progress)
+**Output**: `/data/ti-import/file_rep/file_rep_*.ndjson.gz` (~20M records total)
 
-**Script:** `scripts/parallel_bson_processor.py`
+**Data Coverage**: Up to ~2020 (MongoDB snapshot cutoff)
 
-**Run on phoenix-vt-feeder server:**
+---
+
+### Step 2: Import ✅ COMPLETE
+
+Import processed NDJSON files to TiDB `ioc_file_hashes` table.
+
+**Script**: `file_rep_importer.py`
 
 ```bash
-# Process each shard
-for shard in r01 r02 r03 r04 r05 r06; do
-  nohup python3 parallel_bson_processor.py --shard $shard > bson_${shard}.log 2>&1 &
-done
-```
-
-**Estimated time:** ~5 hours per shard, ~30 hours total
-
-**Output files:**
-- `file_rep_r01_full.ndjson.gz` ... `file_rep_r06_full.ndjson.gz`
-
-## Phase 2: ioc_domains (Pending)
-
-**Script:** `scripts/domain_bson_processor.py`
-
-**Run on phoenix-vt-feeder server:**
-
-```bash
-# Process each shard
-for shard in r01 r02 r03 r04 r05 r06; do
-  nohup python3 domain_bson_processor.py --shard $shard > domain_${shard}.log 2>&1 &
-done
-```
-
-**Filtering Logic:**
-- Skip: `maliciousClassification=unknown` (VT has no data)
-- Skip: `maliciousClassification=indifferent` (neutral, unless has detectedUrls)
-- Keep: Malicious classification or `detectedUrls` with `positives > 0`
-
-## Phase 3: Import to TiDB
-
-**Script:** `scripts/tidb_importer.py`
-
-```bash
-# Import file hashes
-python3 tidb_importer.py \
-  --input-file file_rep_r01_full.ndjson.gz \
-  --host tidb-stg-ap-tokyo-1.cybereason.net \
+python file_rep_importer.py \
+  --input "/data/ti-import/file_rep/file_rep_*.ndjson.gz" \
+  --host localhost --port 3306 \
+  --user root --password phoenix123 \
   --database threat_intel \
-  --table ioc_file_hashes
-
-# Import domains
-python3 tidb_importer.py \
-  --input-file domain_classification_r01.ndjson.gz \
-  --host tidb-stg-ap-tokyo-1.cybereason.net \
-  --database threat_intel \
-  --table ioc_domains
+  --batch-size 5000 --workers 4
 ```
 
-## Scripts Available
+**Key Fields Imported**:
+| Field | Description |
+|-------|-------------|
+| sha256 | Primary key (BINARY 32) |
+| sha1 | Secondary index (BINARY 20) |
+| md5 | Secondary index (BINARY 16) |
+| classification | MALWARE, RANSOMWARE, etc. |
+| detection_names | Extracted from `scans` field: `engine:result;engine:result;...` |
 
-| Script | Purpose | Status |
-| ------ | ------- | ------ |
-| `parallel_bson_processor.py` | Process file_rep BSON | ✅ Ready |
-| `domain_bson_processor.py` | Process domain_classification BSON | ✅ Ready |
-| `tidb_importer.py` | Import NDJSON to TiDB | ✅ Ready |
-| `tokens_importer.py` | Import TOKENS collection | ✅ Used |
-| `generate_sinkhole_seed.py` | Generate sinkhole seed (NOT NEEDED) | ❌ Not used |
+**Status**: ✅ Complete with detection_names (~20M records)
 
-## Update Strategy (Future)
+---
 
-| Data Type | Update Source | Method |
-| --------- | ------------- | ------ |
-| File Hash | VT Feeder GCS | Direct GCS read by Phoenix (future) |
-| Domain    | VT Lookup API | On-demand query + cache in TiDB |
-| IP        | TOKENS        | Manually maintained |
+### Step 3: GCS Update ⏳ PENDING
+
+Update and enrich data using live GCS sources.
+
+#### 3a. Incremental Data (vt-file-feeder-by-date + broccoli-enricher)
+
+Import new file hashes from 2020 onwards (after MongoDB snapshot).
+
+> **Important**: VT Feeder data has **NO classification** - only raw scan results!
+> Classification comes from Broccoli ML service separately.
+> See `docs/schema/VT_FEEDER_UNBOXING.md` for complete data flow.
+
+**Data Flow**:
+```
+vt-file-feeder-by-date          broccoli-enricher
+┌─────────────────────┐        ┌─────────────────────┐
+│ Raw VT Report       │        │ ML Classification   │
+│ - sha1, sha256, md5 │        │ - classification    │
+│ - positives         │   +    │ - algoVersion       │
+│ - scans: {...}      │        │                     │
+│ - NO classification │        │                     │
+└─────────────────────┘        └─────────────────────┘
+         │                              │
+         └──────────────┬───────────────┘
+                        ▼
+              ┌─────────────────────┐
+              │ ioc_file_hashes     │
+              │ - sha256, sha1, md5 │
+              │ - classification    │  ← from broccoli (or inferred)
+              │ - detection_names   │  ← from scans
+              └─────────────────────┘
+```
+
+| Source | Location | Content |
+|--------|----------|---------|
+| VT Reports | `gs://vt-file-feeder-by-date/{YYYYMMDD}/` | Raw scans, hashes, positives |
+
+**Script**: `vt_feeder_importer.py` ✅ Created
+
+```bash
+# Import single day
+python vt_feeder_importer.py --date 20260205 --password phoenix123
+
+# Import date range
+python vt_feeder_importer.py --start-date 20201101 --end-date 20260130 --password phoenix123
+
+# Dry run (test without DB changes)
+python vt_feeder_importer.py --date 20260205 --dry-run --max-files 5 --password phoenix123
+
+# Custom performance tuning
+python vt_feeder_importer.py --start-date 20201101 --end-date 20260130 \
+  --download-workers 30 --db-workers 12 --password phoenix123
+```
+
+**Note**: Database configuration is fixed (localhost:3306, user=root, database=threat_intel)
+
+**Architecture**: Hash-partitioned pipeline with GCS SDK
+- 20 download workers (parallel GCS downloads)
+- 8 DB writers (hash-partitioned by SHA256, no lock contention)
+- UPSERT logic (updates existing records)
+
+**Processing**:
+1. Filter: `positives > 0` (has AV detections)
+2. Extract: `sha256`, `sha1`, `md5`, `detection_names`
+3. UPSERT to `ioc_file_hashes` (classification=NULL, will be filled by broccoli_updater)
+
+**Performance**:
+- Single day (~1440 files): ~5-6 seconds
+- 2 months (Nov-Dec 2020): ~5-6 minutes
+- Full 5 years (2020-11 to 2026-02): ~3 hours
+
+**Dependencies**:
+```bash
+pip install google-cloud-storage mysql-connector-python orjson
+```
+
+#### 3b. Classification Enrichment (broccoli-enricher)
+
+Fill classifications using Broccoli ML results. Run **after** `vt_feeder_importer.py` completes.
+
+| Attribute | Value |
+|-----------|-------|
+| Location | `gs://broccoli-enricher/latest-reports/{sha1}` |
+| Format | JSON file per SHA1 |
+| Content | `{"classification":"malware", "hash":"...", ...}` |
+
+**Script**: `broccoli_updater.py` ✅ Created
+
+```bash
+# Update classifications + cleanup
+python broccoli_updater.py --password phoenix123
+
+# Cleanup only (delete unwanted classifications)
+python broccoli_updater.py --cleanup-only --password phoenix123
+```
+
+**Processing**:
+1. Query records with NULL classification
+2. Lookup Broccoli by SHA1 → update classification
+3. Cleanup: Delete records where classification = INDIFFERENT/UNKNOWN/WHITELIST
+
+---
+
+## Data Sources Summary
+
+| Source | Type | Location | Use |
+|--------|------|----------|-----|
+| MongoDB Dump | Historical | `gs://sage_prod_dump/` | Step 1-2: Initial data (up to 2020) |
+| vt-file-feeder-by-date | Incremental | `gs://vt-file-feeder-by-date/` | Step 3a: Import (positives>0, classification=NULL) |
+| broccoli-enricher | Enrichment | `gs://broccoli-enricher/` | Step 3b: Fill classification + cleanup |
+
+---
+
+## Scripts
+
+| Script | Step | Purpose | Status |
+|--------|------|---------|--------|
+| `parallel_bson_processor.py` | 1 | Process BSON → NDJSON | ✅ Complete |
+| `file_rep_importer.py` | 2 | Import NDJSON to TiDB | ✅ Complete (with detection_names) |
+| `vt_feeder_importer.py` | 3a | Import incremental data (classification=NULL) | ✅ Created |
+| `broccoli_updater.py` | 3b | Fill classification + delete unwanted | ✅ Created |
+
+**Execution Order**:
+1. `vt_feeder_importer.py` - Import VT data with `positives > 0`, classification = NULL
+2. `broccoli_updater.py` - Fill classification from Broccoli ML
+3. `broccoli_updater.py --cleanup-only` - Delete INDIFFERENT/UNKNOWN/WHITELIST records
+
+---
+
+## Current Progress
+
+| Step | Description | Status | Records |
+|------|-------------|--------|---------|
+| 1. Download | BSON → NDJSON | ✅ Complete | 6 shards |
+| 2. Import | NDJSON → TiDB | ✅ Complete | ~20M |
+| 3a. GCS Update (incremental) | vt-file-feeder-by-date | ⏳ Pending | Est. 100M+ |
+| 3b. GCS Update (classification) | broccoli-enricher | ⏳ Pending | ~91K |
+
+---
+
+## VM Environment
+
+```
+Host: phoenix-vt-feeder (34.26.16.84)
+SSH: ssh -i ~/path/to/ppem.pem centos@34.26.16.84
+Database: MariaDB localhost:3306
+Credentials: root / phoenix123
+Data Dir: /data/ti-import/
+```
+
+---
+
+## Quick Reference
+
+```bash
+# Check import progress
+mysql -uroot -pphoenix123 threat_intel -e "SELECT COUNT(*) FROM ioc_file_hashes;"
+
+# Check detection_names coverage
+mysql -uroot -pphoenix123 threat_intel -e \
+  "SELECT COUNT(*) as total, COUNT(detection_names) as with_names FROM ioc_file_hashes;"
+
+# Check empty classifications
+mysql -uroot -pphoenix123 threat_intel -e \
+  "SELECT COUNT(*) FROM ioc_file_hashes WHERE classification IS NULL OR classification = '';"
+
+# Sample detection_names
+mysql -uroot -pphoenix123 threat_intel -e \
+  "SELECT LEFT(detection_names, 100) FROM ioc_file_hashes WHERE detection_names IS NOT NULL LIMIT 3;"
+```
+
+---
+
+## Notes
+
+1. **Detection Names Format**: Extracted from VT `scans` field as `engine:result;engine:result;...`
+2. **Classification Priority**: Broccoli ML > inferred from detection_names > positives count
+3. **Deduplication**: Uses `INSERT IGNORE` based on sha256 primary key
+4. **Case Sensitivity**: SHA1/SHA256 hashes are lowercase in GCS filenames
