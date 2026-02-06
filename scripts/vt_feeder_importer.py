@@ -462,7 +462,6 @@ def process_vt_record(record: Dict[str, Any]) -> Optional[ProcessedRecord]:
 # ----------------------------
 class TiDBImporter:
     MAIN_TABLE = "ioc_file_hashes"
-    STAGING_TABLE = "ioc_file_hashes_staging"
     
     def __init__(self, host: str, port: int, user: str, password: str, database: str,
                  pool_size: int = 5, use_staging: bool = False):
@@ -480,22 +479,38 @@ class TiDBImporter:
         )
         self.logger = logging.getLogger(__name__)
         self.use_staging = use_staging
-        self.target_table = self.STAGING_TABLE if use_staging else self.MAIN_TABLE
-        
-        if use_staging:
-            self._create_staging_table()
+        self.staging_table = None  # Set per-day via set_staging_date()
+        self.target_table = self.MAIN_TABLE  # Default; overridden when staging
+        # Async merge support
+        self._merge_thread = None
+        self._merge_error = None
+        self._merge_date = None  # Date being merged (for checkpoint)
 
-    def _create_staging_table(self):
-        """Create staging table (minimal indexes for fast INSERT)."""
+    def staging_table_name(self, date_str: str) -> str:
+        """Generate staging table name for a date: staging_YYYYMMDD."""
+        return f"staging_{date_str}"
+
+    def set_staging_date(self, date_str: str):
+        """Set the current staging table for a specific date."""
+        self.staging_table = self.staging_table_name(date_str)
+        self.target_table = self.staging_table
+
+    def create_staging_table(self, date_str: str, force_recreate: bool = True):
+        """Create staging table for a specific date.
+        
+        Table name: staging_YYYYMMDD (e.g., staging_20201102)
+        Only primary key index for fast writes.
+        """
+        table_name = self.staging_table_name(date_str)
         try:
             conn = self.pool.get_connection()
             cursor = conn.cursor()
-            # Drop old staging table if exists
-            cursor.execute(f"DROP TABLE IF EXISTS {self.STAGING_TABLE}")
-            # Create staging table matching main table schema
-            # Only primary key index (no sha1/md5 secondary indexes for faster writes)
+            
+            if force_recreate:
+                cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+            
             cursor.execute(f"""
-                CREATE TABLE {self.STAGING_TABLE} (
+                CREATE TABLE IF NOT EXISTS {table_name} (
                     sha256 BINARY(32) NOT NULL,
                     sha1 BINARY(20) DEFAULT NULL,
                     md5 BINARY(16) DEFAULT NULL,
@@ -509,10 +524,39 @@ class TiDBImporter:
             conn.commit()
             cursor.close()
             conn.close()
-            self.logger.info(f"Created staging table: {self.STAGING_TABLE}")
+            self.logger.info(f"Created staging table: {table_name}")
         except Exception as e:
-            self.logger.error(f"Failed to create staging table: {e}")
+            self.logger.error(f"Failed to create staging table {table_name}: {e}")
             raise
+
+    def batch_create_staging_tables(self, date_list: List[str]):
+        """Pre-create all staging tables at once."""
+        conn = self.pool.get_connection()
+        cursor = conn.cursor()
+        created = 0
+        for date_str in date_list:
+            table_name = self.staging_table_name(date_str)
+            cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+            cursor.execute(f"""
+                CREATE TABLE {table_name} (
+                    sha256 BINARY(32) NOT NULL,
+                    sha1 BINARY(20) DEFAULT NULL,
+                    md5 BINARY(16) DEFAULT NULL,
+                    classification ENUM('RANSOMWARE','MALTOOL','HACKTOOL','UNWANTED','MALWARE','SUSPICIOUS','BLACKLIST') DEFAULT NULL,
+                    source ENUM('VIRUS_TOTAL','MALWARE_BAZAAR','INTERNAL','TEST') NOT NULL,
+                    detection_names TEXT DEFAULT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (sha256)
+                ) ENGINE=InnoDB
+            """)
+            created += 1
+            if created % 100 == 0:
+                conn.commit()
+                self.logger.info(f"  Created {created}/{len(date_list)} staging tables...")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        self.logger.info(f"Created {created} staging tables")
 
     def batch_upsert(self, records: List[ProcessedRecord]) -> Tuple[int, int, float]:
         """
@@ -527,9 +571,9 @@ class TiDBImporter:
         t0 = time.time()
 
         if self.use_staging:
-            # Staging: UPSERT within month - later data overwrites earlier
+            # Staging: UPSERT within day - later data overwrites earlier
             sql = f"""
-                INSERT INTO {self.STAGING_TABLE}
+                INSERT INTO {self.staging_table}
                 (sha256, sha1, md5, source, detection_names)
                 VALUES (%s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
@@ -570,17 +614,19 @@ class TiDBImporter:
             self.logger.error(f"Batch upsert failed: {e}")
             raise
 
-    def merge_staging(self) -> int:
-        """Merge staging table into main table using UPSERT.
+    def merge_staging(self, date_str: str = None) -> int:
+        """Merge a staging table into main table using UPSERT.
+        If date_str is provided, merges staging_YYYYMMDD; otherwise uses self.staging_table.
         Returns number of affected rows.
         """
-        self.logger.info(f"Merging {self.STAGING_TABLE} → {self.MAIN_TABLE} ...")
+        table_name = self.staging_table_name(date_str) if date_str else self.staging_table
+        self.logger.info(f"Merging {table_name} → {self.MAIN_TABLE} ...")
         try:
             conn = self.pool.get_connection()
             cursor = conn.cursor()
             
             # Count staging records
-            cursor.execute(f"SELECT COUNT(*) FROM {self.STAGING_TABLE}")
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
             staging_count = cursor.fetchone()[0]
             self.logger.info(f"  Staging records: {staging_count:,}")
             
@@ -588,7 +634,7 @@ class TiDBImporter:
             t0 = time.time()
             cursor.execute(f"""
                 INSERT INTO {self.MAIN_TABLE} (sha256, sha1, md5, source, detection_names)
-                SELECT sha256, sha1, md5, source, detection_names FROM {self.STAGING_TABLE}
+                SELECT sha256, sha1, md5, source, detection_names FROM {table_name}
                 ON DUPLICATE KEY UPDATE
                     sha1 = VALUES(sha1),
                     md5 = VALUES(md5),
@@ -601,15 +647,60 @@ class TiDBImporter:
             self.logger.info(f"  Merged {affected:,} rows in {elapsed:.1f}s")
             
             # Drop staging table
-            cursor.execute(f"DROP TABLE IF EXISTS {self.STAGING_TABLE}")
+            cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
             conn.commit()
             cursor.close()
             conn.close()
-            self.logger.info(f"  Dropped staging table")
+            self.logger.info(f"  Dropped staging table {table_name}")
             return affected
         except Exception as e:
             self.logger.error(f"Merge failed: {e}")
             raise
+
+    def merge_staging_async(self, date_str: str):
+        """Start merge in a background thread, non-blocking.
+        Call wait_for_merge() before starting the next merge or writing checkpoint.
+        """
+        # Wait for any previous merge to complete first
+        self.wait_for_merge()
+        
+        self._merge_error = None
+        self._merge_date = date_str
+        self._merge_thread = threading.Thread(
+            target=self._do_merge_background,
+            args=(date_str,),
+            daemon=True,
+        )
+        self._merge_thread.start()
+
+    def _do_merge_background(self, date_str: str):
+        """Background merge worker."""
+        try:
+            self.merge_staging(date_str)
+        except Exception as e:
+            self._merge_error = e
+
+    def wait_for_merge(self) -> Optional[str]:
+        """Wait for background merge to complete. Returns the merged date_str, or None.
+        Raises if the merge failed.
+        """
+        if self._merge_thread is None:
+            return None
+        
+        if self._merge_thread.is_alive():
+            self.logger.info(f"Waiting for background merge of {self._merge_date} to complete...")
+            self._merge_thread.join()
+        
+        merged_date = self._merge_date
+        self._merge_thread = None
+        self._merge_date = None
+        
+        if self._merge_error:
+            err = self._merge_error
+            self._merge_error = None
+            raise err
+        
+        return merged_date
 
     def get_count(self, table: str = None) -> int:
         """Get current record count."""
@@ -933,15 +1024,18 @@ Examples:
   # Test with single day (dry run)
   python3 vt_feeder_importer.py --date 20260205 --dry-run --max-files 10 --password phoenix123
 
-  # Import single day
-  python3 vt_feeder_importer.py --date 20260205 --password phoenix123
+  # Import single day with staging
+  python3 vt_feeder_importer.py --date 20260205 --staging --password phoenix123
 
   # Import full range (Nov 2020 onwards)
-  python3 vt_feeder_importer.py --start-date 20201101 --end-date 20260130 --password phoenix123
+  python3 vt_feeder_importer.py --start-date 20201101 --end-date 20260130 --staging --password phoenix123
 
-  # Custom performance tuning
-  python3 vt_feeder_importer.py --start-date 20201101 --end-date 20260130 \\
-      --download-workers 30 --db-workers 12 --password phoenix123
+  # PARALLEL IMPORT: Pre-create staging tables, then launch 4 processes
+  python3 vt_feeder_importer.py --start-date 20201101 --end-date 20260130 --staging --create-tables --password phoenix123
+  python3 vt_feeder_importer.py --start-date 20201101 --end-date 20210601 --staging --password phoenix123 &
+  python3 vt_feeder_importer.py --start-date 20210601 --end-date 20220101 --staging --password phoenix123 &
+  python3 vt_feeder_importer.py --start-date 20220101 --end-date 20230701 --staging --password phoenix123 &
+  python3 vt_feeder_importer.py --start-date 20230701 --end-date 20260130 --staging --password phoenix123 &
 
 Note: Dates before 2020-11-01 are skipped (covered by MongoDB dump).
 """,
@@ -964,8 +1058,11 @@ Note: Dates before 2020-11-01 are skipped (covered by MongoDB dump).
     parser.add_argument("--max-files", type=int, help="Max files per day (for testing)")
     parser.add_argument("--dry-run", action="store_true", help="Don't insert to database")
     parser.add_argument("--staging", action="store_true",
-                       help="Use staging table for fast INSERT, merge to main table at the end. "
-                            "Much faster for large imports (5-10x speedup)")
+                       help="Use per-day staging tables (staging_YYYYMMDD) for fast INSERT, "
+                            "merge to main table after each day. Much faster for large imports.")
+    parser.add_argument("--create-tables", action="store_true",
+                       help="Only create staging tables for the date range and exit. "
+                            "Use this to pre-create tables before launching parallel processes.")
     args = parser.parse_args()
     
     # Fixed database configuration (localhost MySQL)
@@ -1056,7 +1153,15 @@ Note: Dates before 2020-11-01 are skipped (covered by MongoDB dump).
             use_staging=args.staging,
         )
         if args.staging:
-            logger.info("Mode: STAGING (fast INSERT → merge at end)")
+            logger.info("Mode: STAGING (per-day staging_YYYYMMDD → merge at end of each day)")
+        
+        # --create-tables mode: pre-create all staging tables and exit
+        if args.create_tables:
+            logger.info(f"Creating {len(dates)} staging tables...")
+            importer.batch_create_staging_tables(dates)
+            logger.info("Done! Tables created. You can now launch parallel processes.")
+            sys.exit(0)
+        
         initial_count = importer.get_count()
         logger.info(f"Connected to {DB_HOST}:{DB_PORT}/{DB_NAME}")
         logger.info(f"Initial record count: {initial_count:,}")
@@ -1070,77 +1175,79 @@ Note: Dates before 2020-11-01 are skipped (covered by MongoDB dump).
     }
 
     # Checkpoint file to track completed dates (enables resume on interruption)
-    checkpoint_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".vt_feeder_checkpoint")
+    # Uses date range in filename so parallel processes don't conflict
+    checkpoint_file = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        f".vt_feeder_checkpoint_{dates[0]}_{dates[-1]}"
+    )
     completed_dates = set()
     if os.path.exists(checkpoint_file):
         with open(checkpoint_file, "r") as f:
             completed_dates = {line.strip() for line in f if line.strip()}
         if completed_dates:
-            logger.info(f"Found checkpoint: {len(completed_dates)} dates already completed, will skip them")
+            logger.info(f"Found checkpoint ({os.path.basename(checkpoint_file)}): "
+                        f"{len(completed_dates)} dates already completed, will skip them")
 
     start_time = time.time()
 
-    # Group dates by month for staging mode
-    from collections import OrderedDict
-    months = OrderedDict()  # "YYYYMM" -> [date_str, ...]
-    for date_str in dates:
-        month_key = date_str[:6]  # "202011", "202012", etc.
-        if month_key not in months:
-            months[month_key] = []
-        months[month_key].append(date_str)
-
-    if args.staging:
-        logger.info(f"Months to process: {len(months)} ({', '.join(months.keys())})")
-
     days_done = 0
-    for month_key, month_dates in months.items():
-        # In staging mode: create fresh staging table per month
-        if args.staging and importer and not args.dry_run:
-            logger.info("")
-            logger.info(f"{'='*70}")
-            logger.info(f"MONTH {month_key}: {len(month_dates)} days")
-            logger.info(f"{'='*70}")
-            importer._create_staging_table()
-
-        for date_str in month_dates:
-            if date_str in completed_dates:
-                days_done += 1
-                continue
-
-            day_stats = import_date(
-                importer=importer,
-                date_str=date_str,
-                batch_size=BATCH_SIZE,
-                max_files=args.max_files,
-                download_workers=args.download_workers,
-                db_workers=args.db_workers,
-                dry_run=args.dry_run,
-            )
-            
-            for key in total_stats:
-                total_stats[key] += day_stats.get(key, 0)
-
-            # Save checkpoint (append completed date)
-            if not args.dry_run:
-                with open(checkpoint_file, "a") as f:
-                    f.write(f"{date_str}\n")
-            
+    for date_idx, date_str in enumerate(dates):
+        if date_str in completed_dates:
             days_done += 1
+            continue
 
-            # Progress for multi-day runs
-            if len(dates) > 1 and days_done % 7 == 0:
-                elapsed = time.time() - start_time
-                days_left = len(dates) - days_done
-                eta_seconds = (elapsed / max(days_done, 1)) * days_left
-                eta_hours = eta_seconds / 3600
-                logger.info(f"Overall: {days_done}/{len(dates)} days | ETA: {eta_hours:.1f} hours")
-
-        # In staging mode: merge staging → main after each month
+        # In staging mode: wait for previous async merge + write its checkpoint
         if args.staging and importer and not args.dry_run:
-            logger.info(f"Month {month_key} import complete, merging to main table...")
-            importer.merge_staging()
-            main_count = importer.get_count()
-            logger.info(f"Main table record count: {main_count:,}")
+            merged_date = importer.wait_for_merge()
+            if merged_date and not args.dry_run:
+                with open(checkpoint_file, "a") as f:
+                    f.write(f"{merged_date}\n")
+
+        # In staging mode: set up per-day staging table
+        if args.staging and importer and not args.dry_run:
+            importer.set_staging_date(date_str)
+            importer.create_staging_table(date_str, force_recreate=True)
+
+        day_stats = import_date(
+            importer=importer,
+            date_str=date_str,
+            batch_size=BATCH_SIZE,
+            max_files=args.max_files,
+            download_workers=args.download_workers,
+            db_workers=args.db_workers,
+            dry_run=args.dry_run,
+        )
+        
+        for key in total_stats:
+            total_stats[key] += day_stats.get(key, 0)
+
+        # In staging mode: start async merge (non-blocking)
+        if args.staging and importer and not args.dry_run:
+            importer.merge_staging_async(date_str)
+        
+        # Non-staging mode: write checkpoint immediately
+        if not args.staging and not args.dry_run:
+            with open(checkpoint_file, "a") as f:
+                f.write(f"{date_str}\n")
+        
+        days_done += 1
+
+        # Progress for multi-day runs
+        if len(dates) > 1 and days_done % 7 == 0:
+            elapsed = time.time() - start_time
+            days_left = len(dates) - days_done
+            eta_seconds = (elapsed / max(days_done, 1)) * days_left
+            eta_hours = eta_seconds / 3600
+            main_count = importer.get_count() if importer else 0
+            logger.info(f"Overall: {days_done}/{len(dates)} days | "
+                        f"Main table: {main_count:,} | ETA: {eta_hours:.1f} hours")
+
+    # Wait for last async merge to complete + write checkpoint
+    if args.staging and importer and not args.dry_run:
+        merged_date = importer.wait_for_merge()
+        if merged_date:
+            with open(checkpoint_file, "a") as f:
+                f.write(f"{merged_date}\n")
 
     elapsed = time.time() - start_time
     elapsed_hours = elapsed / 3600
