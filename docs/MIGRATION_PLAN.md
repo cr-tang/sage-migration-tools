@@ -1,169 +1,156 @@
-# TI Data Migration Plan
+# VT Data Migration Plan - Parquet Export Pipeline
 
-> See also: [Confluence Status Page](https://cybereason.atlassian.net/wiki/spaces/CE/pages/32394936365/Phoenix+Flink+TI+Enrichment+Data+Migration+Status)
+> **Updated Architecture**: Direct Parquet export with in-place classification backfill for TiDB Lightning import
 
 ## Overview
 
-Migrate file hash reputation data from Sage MongoDB to Phoenix TiDB, with three distinct steps:
+Export VirusTotal file reputation data from GCS to Parquet format, with three distinct steps:
 
-1. **Download** - Download and process BSON dumps from MongoDB snapshot
-2. **Import** - Import processed NDJSON to TiDB
-3. **GCS Update** - Update/enrich data using live GCS sources (vt-file-feeder-by-date + broccoli-enricher)
-
----
-
-## File Rep Migration: Three Steps
-
-### Step 1: Download ✅ COMPLETE
-
-Download and process MongoDB BSON dumps into NDJSON format.
-
-| Source | Location | Status |
-|--------|----------|--------|
-| file_rep (6 shards) | `gs://sage_prod_dump/cr-mongo-shard-{r01-r06}.cybereason.net/sage/file_rep.bson` | ✅ Downloaded |
-
-**Processing**:
-```bash
-# Process BSON → NDJSON (per shard)
-python parallel_bson_processor.py \
-  --input-file gs://sage_prod_dump/new/cr-mongo-shard-r01.cybereason.net/cybereason/file_rep.bson \
-  --output-file /data/ti-import/file_rep/file_rep_r01.ndjson.gz
-```
-
-**Output**: `/data/ti-import/file_rep/file_rep_*.ndjson.gz` (~20M records total)
-
-**Data Coverage**: Up to ~2020 (MongoDB snapshot cutoff)
+1. **Export** - Download, decompress, deduplicate, and export VT data to Parquet
+2. **Backfill** - Enrich Parquet files with Broccoli ML classification (in-place)
+3. **Import** - Bulk import Parquet files to TiDB using Lightning
 
 ---
 
-### Step 2: Import ✅ COMPLETE
+## Step 1: Export VT Data to Parquet ⏳ IN PROGRESS
 
-Import processed NDJSON files to TiDB `ioc_file_hashes` table.
+Download VT reports from GCS, decompress, deduplicate, and export to Parquet format.
 
-**Script**: `file_rep_importer.py`
-
-```bash
-python file_rep_importer.py \
-  --input "/data/ti-import/file_rep/file_rep_*.ndjson.gz" \
-  --host localhost --port 3306 \
-  --user root --password phoenix123 \
-  --database threat_intel \
-  --batch-size 5000 --workers 4
-```
-
-**Key Fields Imported**:
-| Field | Description |
-|-------|-------------|
-| sha256 | Primary key (BINARY 32) |
-| sha1 | Secondary index (BINARY 20) |
-| md5 | Secondary index (BINARY 16) |
-| classification | MALWARE, RANSOMWARE, etc. |
-| detection_names | Extracted from `scans` field: `engine:result;engine:result;...` |
-
-**Status**: ✅ Complete with detection_names (~20M records)
-
----
-
-### Step 3: GCS Update ⏳ PENDING
-
-Update and enrich data using live GCS sources.
-
-#### 3a. Incremental Data (vt-file-feeder-by-date + broccoli-enricher)
-
-Import new file hashes from 2020 onwards (after MongoDB snapshot).
-
-> **Important**: VT Feeder data has **NO classification** - only raw scan results!
-> Classification comes from Broccoli ML service separately.
-> See `docs/schema/VT_FEEDER_UNBOXING.md` for complete data flow.
-
-**Data Flow**:
-```
-vt-file-feeder-by-date          broccoli-enricher
-┌─────────────────────┐        ┌─────────────────────┐
-│ Raw VT Report       │        │ ML Classification   │
-│ - sha1, sha256, md5 │        │ - classification    │
-│ - positives         │   +    │ - algoVersion       │
-│ - scans: {...}      │        │                     │
-│ - NO classification │        │                     │
-└─────────────────────┘        └─────────────────────┘
-         │                              │
-         └──────────────┬───────────────┘
-                        ▼
-              ┌─────────────────────┐
-              │ ioc_file_hashes     │
-              │ - sha256, sha1, md5 │
-              │ - classification    │  ← from broccoli (or inferred)
-              │ - detection_names   │  ← from scans
-              └─────────────────────┘
-```
-
-| Source | Location | Content |
-|--------|----------|---------|
-| VT Reports | `gs://vt-file-feeder-by-date/{YYYYMMDD}/` | Raw scans, hashes, positives |
-
-**Script**: `vt_feeder_importer.py` ✅ Created
+**Script**: `vt_parquet_exporter.py`
 
 ```bash
-# Import single day
-python vt_feeder_importer.py --date 20260205 --password phoenix123
+# Export VT data (2020-11 to 2026-01)
+python3 vt_parquet_exporter.py \
+  --output-dir /data/vt_export \
+  --start-date 20201101 \
+  --end-date 20260130 \
+  --workers 30
 
-# Import date range
-python vt_feeder_importer.py --start-date 20201101 --end-date 20260130 --password phoenix123
-
-# Dry run (test without DB changes)
-python vt_feeder_importer.py --date 20260205 --dry-run --max-files 5 --password phoenix123
-
-# Custom performance tuning
-python vt_feeder_importer.py --start-date 20201101 --end-date 20260130 \
-  --download-workers 30 --db-workers 12 --password phoenix123
+# Auto-resume from checkpoint (default behavior)
+python3 vt_parquet_exporter.py --output-dir /data/vt_export
 ```
 
-**Note**: Database configuration is fixed (localhost:3306, user=root, database=threat_intel)
-
-**Architecture**: Hash-partitioned pipeline with GCS SDK
-- 20 download workers (parallel GCS downloads)
-- 8 DB writers (hash-partitioned by SHA256, no lock contention)
-- UPSERT logic (updates existing records)
-
-**Processing**:
-1. Filter: `positives > 0` (has AV detections)
-2. Extract: `sha256`, `sha1`, `md5`, `detection_names`
-3. UPSERT to `ioc_file_hashes` (classification=NULL, will be filled by broccoli_updater)
+**Architecture**:
+- **Multi-process**: 30 worker processes for CPU-bound tar.bz2 decompression + JSON parsing
+- **Deduplication**: In-memory SHA256 set (binary checkpoint for fast restarts)
+- **Checkpointing**: `.progress` (per-day status) + `.dedup_checkpoint` (SHA256 set)
+- **Output Format**: Parquet with zstd compression, 500K rows per file
 
 **Performance**:
-- Single day (~1440 files): ~5-6 seconds
-- 2 months (Nov-Dec 2020): ~5-6 minutes
-- Full 5 years (2020-11 to 2026-02): ~3 hours
+- **Throughput**: ~17-18 files/sec on 32-vCPU GCE VM
+- **Data Coverage**: 2020-11-01 to 2026-01-30 (~1570 days)
+- **Dedup Rebuild**: 10-20 seconds (from binary checkpoint)
+- **ETA**: ~30 hours for full export
 
-**Dependencies**:
+**Key Fields Extracted**:
+| Field | Description |
+|-------|-------------|
+| sha256 | Primary key |
+| sha1 | Secondary index |
+| md5 | Secondary index |
+| positives | Number of AV detections |
+| total | Total AV engines scanned |
+| scan_date | VT scan timestamp |
+| detection_names | Extracted from `scans`: `engine:result;engine:result;...` |
+| classification | Initially NULL, filled by broccoli_backfill.py |
+| date | Export date (YYYYMMDD) |
+
+**Status**: ⏳ In Progress (Day 125/1570)
+
+---
+
+---
+
+## Step 2: Backfill Classification ⏳ IN PROGRESS
+
+Enrich Parquet files with Broccoli ML classification data from GCS (in-place updates).
+
+**Script**: `broccoli_backfill.py`
+
 ```bash
-pip install google-cloud-storage mysql-connector-python orjson
+# Backfill classification (4 worker processes, auto-resume)
+python3 broccoli_backfill.py /data/vt_export --workers 4
+
+# Custom worker count (e.g., 8 processes)
+python3 broccoli_backfill.py /data/vt_export --workers 8
+
+# Dry run (count SHA1s without GCS lookup)
+python3 broccoli_backfill.py /data/vt_export --dry-run
 ```
 
-#### 3b. Classification Enrichment (broccoli-enricher)
+**Architecture**:
+- **Multi-process**: 4 worker processes (default), each with independent asyncio event loop
+- **Concurrency**: 500 aiohttp connections per process (2000 total)
+- **GCS Access**: Raw HTTP XML API (bypasses slow GCS Python SDK)
+- **Lookup**: `gs://broccoli-enricher/latest-reports/{sha1}` → JSON with classification
+- **Update Strategy**: In-place Parquet modification (no disk doubling)
+- **Progress Tracking**: Multi-process safe with `fcntl` file locking
 
-Fill classifications using Broccoli ML results. Run **after** `vt_feeder_importer.py` completes.
+**Performance**:
+- **Throughput**: ~6800 QPS aggregate (4 processes × ~1700 QPS each)
+- **Error Rate**: 0% (with exponential backoff retry)
+- **Timeouts**: 30s connect, 30s read, 60s total
+- **ETA**: ~4.7 hours for 77 Parquet files (~2M unique SHA1s)
 
-| Attribute | Value |
-|-----------|-------|
-| Location | `gs://broccoli-enricher/latest-reports/{sha1}` |
-| Format | JSON file per SHA1 |
-| Content | `{"classification":"malware", "hash":"...", ...}` |
+**Status**: ⏳ In Progress (16/77 files completed)
 
-**Script**: `broccoli_updater.py` ✅ Created
+---
 
+## Step 3: Import to TiDB ⏳ PENDING
+
+Bulk import Parquet files to TiDB using Lightning.
+
+**Transfer Parquet Files** (GCP → OCI):
 ```bash
-# Update classifications + cleanup
-python broccoli_updater.py --password phoenix123
+# Option 1: rsync over SSH
+rsync -avz --progress /data/vt_export/*.parquet \
+  user@oci-tidb-host:/data/tidb_import/vt_export/
 
-# Cleanup only (delete unwanted classifications)
-python broccoli_updater.py --cleanup-only --password phoenix123
+# Option 2: scp
+scp /data/vt_export/*.parquet \
+  user@oci-tidb-host:/data/tidb_import/vt_export/
 ```
 
-**Processing**:
-1. Query records with NULL classification
-2. Lookup Broccoli by SHA1 → update classification
-3. Cleanup: Delete records where classification = INDIFFERENT/UNKNOWN/WHITELIST
+**TiDB Lightning Import**:
+```bash
+# On OCI TiDB host
+tiup tidb-lightning \
+  --backend local \
+  --sorted-kv-dir /data/tidb_import/sorted \
+  --data-source-dir /data/vt_export/ \
+  --tidb-host tidb-prod.cybereason.net \
+  --tidb-port 4000 \
+  --pd-addr pd-prod.cybereason.net:2379 \
+  --config lightning.toml
+```
+
+**Lightning Config** (`lightning.toml`):
+```toml
+[lightning]
+level = "info"
+
+[tikv-importer]
+backend = "local"
+sorted-kv-dir = "/data/tidb_import/sorted"
+
+[mydumper]
+data-source-dir = "/data/vt_export"
+no-schema = true
+
+[tidb]
+host = "tidb-prod.cybereason.net"
+port = 4000
+user = "root"
+status-port = 10080
+pd-addr = "pd-prod.cybereason.net:2379"
+```
+
+**Estimated Transfer**:
+- **Data Size**: ~50-70 GB (compressed Parquet)
+- **Transfer Time**: 2-4 hours over public internet (GCP → OCI)
+- **Import Time**: 1-2 hours (Lightning local backend)
+
+**Status**: ⏳ Pending (waiting for Step 2 completion)
 
 ---
 
@@ -171,9 +158,8 @@ python broccoli_updater.py --cleanup-only --password phoenix123
 
 | Source | Type | Location | Use |
 |--------|------|----------|-----|
-| MongoDB Dump | Historical | `gs://sage_prod_dump/` | Step 1-2: Initial data (up to 2020) |
-| vt-file-feeder-by-date | Incremental | `gs://vt-file-feeder-by-date/` | Step 3a: Import (positives>0, classification=NULL) |
-| broccoli-enricher | Enrichment | `gs://broccoli-enricher/` | Step 3b: Fill classification + cleanup |
+| vt-file-feeder-by-date | VT Reports | `gs://vt-file-feeder-by-date/{YYYYMMDD}/` | Step 1: Export raw scan data |
+| broccoli-enricher | ML Classification | `gs://broccoli-enricher/latest-reports/{sha1}` | Step 2: Backfill classification |
 
 ---
 
@@ -181,37 +167,37 @@ python broccoli_updater.py --cleanup-only --password phoenix123
 
 | Script | Step | Purpose | Status |
 |--------|------|---------|--------|
-| `parallel_bson_processor.py` | 1 | Process BSON → NDJSON | ✅ Complete |
-| `file_rep_importer.py` | 2 | Import NDJSON to TiDB | ✅ Complete (with detection_names) |
-| `vt_feeder_importer.py` | 3a | Import incremental data (classification=NULL) | ✅ Created |
-| `broccoli_updater.py` | 3b | Fill classification + delete unwanted | ✅ Created |
+| `vt_parquet_exporter.py` | 1 | Export VT data to Parquet | ⏳ In Progress |
+| `broccoli_backfill.py` | 2 | Backfill classification (in-place) | ⏳ In Progress |
+| TiDB Lightning | 3 | Bulk import to TiDB | ⏳ Pending |
 
 **Execution Order**:
-1. `vt_feeder_importer.py` - Import VT data with `positives > 0`, classification = NULL
-2. `broccoli_updater.py` - Fill classification from Broccoli ML
-3. `broccoli_updater.py --cleanup-only` - Delete INDIFFERENT/UNKNOWN/WHITELIST records
+1. `vt_parquet_exporter.py` - Export VT data with deduplication
+2. `broccoli_backfill.py` - Fill classification from Broccoli ML
+3. Transfer Parquet files (GCP → OCI)
+4. TiDB Lightning import
 
 ---
 
 ## Current Progress
 
-| Step | Description | Status | Records |
-|------|-------------|--------|---------|
-| 1. Download | BSON → NDJSON | ✅ Complete | 6 shards |
-| 2. Import | NDJSON → TiDB | ✅ Complete | ~20M |
-| 3a. GCS Update (incremental) | vt-file-feeder-by-date | ⏳ Pending | Est. 100M+ |
-| 3b. GCS Update (classification) | broccoli-enricher | ⏳ Pending | ~91K |
+| Step | Description | Status | Progress |
+|------|-------------|--------|----------|
+| 1. Export | VT data → Parquet | ⏳ In Progress | Day 125/1570 (~8%) |
+| 2. Backfill | Broccoli classification | ⏳ In Progress | 16/77 files (~21%) |
+| 3. Transfer | Parquet (GCP → OCI) | ⏳ Pending | - |
+| 4. Import | TiDB Lightning | ⏳ Pending | - |
 
 ---
 
 ## VM Environment
 
 ```
-Host: phoenix-vt-feeder (34.26.16.84)
+Host: phoenix-vt-feeder (GCE, 32 vCPU, 128 GB RAM)
+IP: 34.26.16.84
 SSH: ssh -i ~/path/to/ppem.pem centos@34.26.16.84
-Database: MariaDB localhost:3306
-Credentials: root / phoenix123
-Data Dir: /data/ti-import/
+Data Dir: /data/vt_export/
+Logs: /data/vt_export/export.log, /data/vt_export/backfill.log
 ```
 
 ---
@@ -219,20 +205,20 @@ Data Dir: /data/ti-import/
 ## Quick Reference
 
 ```bash
-# Check import progress
-mysql -uroot -pphoenix123 threat_intel -e "SELECT COUNT(*) FROM ioc_file_hashes;"
+# Check export progress
+tail -f /data/vt_export/export.log
 
-# Check detection_names coverage
-mysql -uroot -pphoenix123 threat_intel -e \
-  "SELECT COUNT(*) as total, COUNT(detection_names) as with_names FROM ioc_file_hashes;"
+# Check backfill progress
+tail -f /data/vt_export/backfill.log
 
-# Check empty classifications
-mysql -uroot -pphoenix123 threat_intel -e \
-  "SELECT COUNT(*) FROM ioc_file_hashes WHERE classification IS NULL OR classification = '';"
+# Check Parquet file count
+ls -1 /data/vt_export/*.parquet | wc -l
 
-# Sample detection_names
-mysql -uroot -pphoenix123 threat_intel -e \
-  "SELECT LEFT(detection_names, 100) FROM ioc_file_hashes WHERE detection_names IS NOT NULL LIMIT 3;"
+# Check total output size
+du -sh /data/vt_export/
+
+# Check CPU/memory usage
+top -b -n 1 | head -20
 ```
 
 ---
@@ -240,6 +226,8 @@ mysql -uroot -pphoenix123 threat_intel -e \
 ## Notes
 
 1. **Detection Names Format**: Extracted from VT `scans` field as `engine:result;engine:result;...`
-2. **Classification Priority**: Broccoli ML > inferred from detection_names > positives count
-3. **Deduplication**: Uses `INSERT IGNORE` based on sha256 primary key
+2. **Classification**: From Broccoli ML (MALWARE, RANSOMWARE, PUA, etc.) or NULL
+3. **Deduplication**: SHA256-based in-memory set with binary checkpoint
 4. **Case Sensitivity**: SHA1/SHA256 hashes are lowercase in GCS filenames
+5. **Resume Support**: Both scripts auto-resume from checkpoints
+6. **Parallel Execution**: `vt_parquet_exporter.py` and `broccoli_backfill.py` can run concurrently
