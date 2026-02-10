@@ -71,8 +71,34 @@ def import_parquet_to_tidb(
     read_time = time.time() - t0
     print(f"  ✓ Read {len(df):,} rows in {read_time:.1f}s")
 
+    # Vectorized preprocessing (much faster than iterrows)
+    print(f"[2/4] Preprocessing data (vectorized)...")
+    t0_prep = time.time()
+    
+    # Convert hex strings to bytes (vectorized)
+    df['sha256_bin'] = df['sha256'].apply(lambda x: bytes.fromhex(x) if pd.notna(x) and x else None)
+    df['sha1_bin'] = df['sha1'].apply(lambda x: bytes.fromhex(x) if pd.notna(x) and x else None)
+    df['md5_bin'] = df['md5'].apply(lambda x: bytes.fromhex(x) if pd.notna(x) and x else None)
+    
+    # Map classifications (vectorized)
+    def map_classification(cls):
+        if pd.isna(cls) or not cls:
+            return "UNKNOWN"
+        cls = str(cls).upper()
+        if cls in ["PUA", "UNWANTED"]:
+            return "UNWANTED"
+        if cls in ["RANSOMWARE", "MALTOOL", "HACKTOOL", "MALWARE", "SUSPICIOUS", "BLACKLIST", "AV_DETECTED", "INDIFFERENT", "UNKNOWN"]:
+            return cls
+        return "UNKNOWN"
+    
+    df['classification_mapped'] = df['classification'].apply(map_classification)
+    df['detection_names_clean'] = df['detection_names'].where(df['detection_names'].notna(), None)
+    
+    prep_time = time.time() - t0_prep
+    print(f"  ✓ Preprocessed {len(df):,} rows in {prep_time:.1f}s")
+
     # Connect to TiDB
-    print(f"[2/3] Connecting to TiDB at {host}:{port}...")
+    print(f"[3/4] Connecting to TiDB at {host}:{port}...")
     try:
         conn = mysql.connector.connect(
             host=host,
@@ -99,7 +125,7 @@ def import_parquet_to_tidb(
     """
 
     # Batch insert with retry on transient errors
-    print(f"[3/3] Inserting data (batch size: {batch_size:,})...")
+    print(f"[4/4] Inserting data (batch size: {batch_size:,})...")
     t0 = time.time()
     rows_inserted = 0
     rows_skipped = 0
@@ -109,36 +135,16 @@ def import_parquet_to_tidb(
     try:
         for i in range(0, len(df), batch_size):
             batch = df.iloc[i : i + batch_size]
-            values = []
-
-            for _, row in batch.iterrows():
-                # Convert hex string SHA to binary
-                sha256_bin = bytes.fromhex(row["sha256"]) if row["sha256"] else None
-                sha1_bin = bytes.fromhex(row["sha1"]) if row["sha1"] else None
-                md5_bin = bytes.fromhex(row["md5"]) if row["md5"] else None
-                
-                # Map classification to TiDB enum values
-                classification = row["classification"]
-                if classification and not (isinstance(classification, float) and pd.isna(classification)):
-                    classification = str(classification).upper()
-                    # Map broccoli values to TiDB enum
-                    if classification == "PUA" or classification == "UNWANTED":
-                        classification = "UNWANTED"
-                    elif classification not in ["RANSOMWARE", "MALTOOL", "HACKTOOL", "UNWANTED", "MALWARE", "SUSPICIOUS", "BLACKLIST", "AV_DETECTED", "INDIFFERENT", "UNKNOWN"]:
-                        classification = "UNKNOWN"
-                else:
-                    classification = "UNKNOWN"
-                
-                values.append(
-                    (
-                        sha256_bin,
-                        sha1_bin,
-                        md5_bin,
-                        classification,
-                        "VIRUS_TOTAL",  # source
-                        row["detection_names"] if row["detection_names"] else None,
-                    )
-                )
+            
+            # Convert to list of tuples (FAST - no iterrows!)
+            values = list(zip(
+                batch['sha256_bin'],
+                batch['sha1_bin'],
+                batch['md5_bin'],
+                batch['classification_mapped'],
+                ['VIRUS_TOTAL'] * len(batch),  # source
+                batch['detection_names_clean']
+            ))
 
             # Retry logic for transient errors
             retry_count = 0
