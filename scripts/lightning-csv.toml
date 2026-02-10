@@ -1,0 +1,68 @@
+# TiDB Lightning Configuration for VT CSV Import
+# Usage: tiup tidb-lightning --config lightning-csv.toml
+
+[lightning]
+level = "info"
+file = "tidb_lightning.log"
+check-requirements = true
+
+[tikv-importer]
+backend = "local"
+sorted-kv-dir = "/data/tidb_import/sorted"
+range-concurrency = 16
+
+[mydumper]
+# Directory containing CSV files
+data-source-dir = "/data/vt_export_csv"
+# CSV parsing configuration
+data-character-set = "utf8mb4"
+data-invalid-char-replace = "\uFFFD"
+
+# CSV format configuration
+[mydumper.csv]
+separator = ','
+delimiter = '"'
+header = false
+not-null = false
+null = '\N'
+backslash-escape = true
+trim-last-separator = false
+
+[tidb]
+host = "tidb-dev-us-ashburn-1.cybereason.net"
+port = 4000
+user = "root"
+password = "kDraCqVFihq5WwSh"
+status-port = 10080
+pd-addr = "pd-dev-us-ashburn-1.cybereason.net:2379"
+
+[checkpoint]
+enable = true
+driver = "file"
+dsn = "/tmp/tidb_lightning_checkpoint.pb"
+
+[post-restore]
+level1-compact = true
+compact = true
+analyze = "required"
+
+# Table-specific configuration
+[[mydumper.files]]
+pattern = 'part_(\d+)\.csv'
+schema = "threat_intel"
+table = "ioc_file_hashes"
+type = "csv"
+
+# Column mapping (CSV columns → TiDB columns)
+# CSV format: sha256_hex,sha1_hex,md5_hex,classification,source,detection_names
+# TiDB expects: UNHEX() for binary columns
+[[mydumper.files.sql]]
+# Transform hex strings to binary
+transforms = [
+  "UNHEX(column_01) AS sha256",
+  "UNHEX(column_02) AS sha1", 
+  "UNHEX(column_03) AS md5",
+  "column_04 AS classification",
+  "column_05 AS source",
+  "column_06 AS detection_names"
+]
