@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Import Parquet files to TiDB via MySQL protocol.
+"""Import Parquet files to TiDB via MySQL protocol with auto-resume.
 
 Usage:
-    # Port-forward to TiDB first
-    kubectl port-forward -n <namespace> svc/tidb 4000:4000
-
+    # Import from directory (recommended)
+    python3 import_parquet_to_tidb.py /tmp/parquet_files/ --password <pwd>
+    
     # Import single file
     python3 import_parquet_to_tidb.py part_0000.parquet --password <pwd>
 
@@ -20,6 +20,27 @@ import sys
 import time
 import pandas as pd
 from pathlib import Path
+import fcntl
+
+
+def mark_file_done(progress_file: Path, filename: str):
+    """Mark a file as successfully imported (thread-safe with file locking)."""
+    with open(progress_file, "a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(f"{filename}\n")
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def get_completed_files(progress_file: Path) -> set:
+    """Read the progress file to get list of completed imports."""
+    if not progress_file.exists():
+        return set()
+    
+    with open(progress_file, "r") as f:
+        return set(line.strip() for line in f if line.strip())
 
 
 def import_parquet_to_tidb(
@@ -30,16 +51,15 @@ def import_parquet_to_tidb(
     password: str,
     database: str,
     batch_size: int = 5000,
-    filter_classifications: bool = True,
 ):
-    """Import a single Parquet file to TiDB."""
+    """Import a pre-filtered Parquet file to TiDB."""
 
     print(f"\n{'='*80}")
     print(f"Importing: {parquet_file}")
     print(f"{'='*80}")
 
     # Read Parquet
-    print(f"[1/4] Reading Parquet file...")
+    print(f"[1/3] Reading Parquet file...")
     t0 = time.time()
     try:
         table = pq.read_table(parquet_file)
@@ -49,29 +69,10 @@ def import_parquet_to_tidb(
         return False
 
     read_time = time.time() - t0
-    original_count = len(df)
-    print(f"  ✓ Read {original_count:,} rows in {read_time:.1f}s")
-
-    # Filter classifications
-    if filter_classifications:
-        print(f"[2/4] Filtering classifications...")
-        # Keep: malware, ransomware, unwanted (PUA), hacktool
-        # Filter out: indifferent, unknown, whitelist, NULL
-        filter_out = {'indifferent', 'unknown', 'whitelist'}
-        before = len(df)
-        df = df[
-            df['classification'].notna() &
-            ~df['classification'].isin(filter_out)
-        ]
-        after = len(df)
-        filtered = before - after
-        print(f"  ✓ Filtered out {filtered:,} rows ({filtered/before*100:.1f}%)")
-        print(f"  ✓ Remaining: {after:,} rows ({after/before*100:.1f}%)")
-    else:
-        print(f"[2/4] Skipping classification filter (importing all rows)")
+    print(f"  ✓ Read {len(df):,} rows in {read_time:.1f}s")
 
     # Connect to TiDB
-    print(f"[3/4] Connecting to TiDB at {host}:{port}...")
+    print(f"[2/3] Connecting to TiDB at {host}:{port}...")
     try:
         conn = mysql.connector.connect(
             host=host,
@@ -89,21 +90,18 @@ def import_parquet_to_tidb(
         print(f"❌ Connection failed: {e}")
         return False
 
-    # Prepare INSERT statement (now with scan_date, positives, total)
+    # Prepare INSERT statement
     insert_sql = """
     INSERT INTO ioc_file_hashes 
-    (sha256, sha1, md5, classification, source, detection_names, scan_date, positives, total)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    (sha256, sha1, md5, classification, source, detection_names)
+    VALUES (%s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
         classification = VALUES(classification),
-        detection_names = VALUES(detection_names),
-        scan_date = VALUES(scan_date),
-        positives = VALUES(positives),
-        total = VALUES(total)
+        detection_names = VALUES(detection_names)
     """
 
     # Batch insert
-    print(f"[4/4] Inserting data (batch size: {batch_size:,})...")
+    print(f"[3/3] Inserting data (batch size: {batch_size:,})...")
     t0 = time.time()
     rows_inserted = 0
     errors = 0
@@ -131,20 +129,6 @@ def import_parquet_to_tidb(
                 else:
                     classification = "UNKNOWN"
                 
-                # Parse scan_date (format: "2024-12-23" -> date)
-                scan_date = None
-                if "scan_date" in row and row["scan_date"] and not pd.isna(row["scan_date"]):
-                    scan_date_str = str(row["scan_date"])[:10]  # Take YYYY-MM-DD part
-                    scan_date = scan_date_str if scan_date_str else None
-                
-                # Get positives and total (capped at 255 for TINYINT UNSIGNED)
-                positives = None
-                total = None
-                if "positives" in row and not pd.isna(row["positives"]):
-                    positives = min(int(row["positives"]), 255)
-                if "total" in row and not pd.isna(row["total"]):
-                    total = min(int(row["total"]), 255)
-                
                 values.append(
                     (
                         sha256_bin,
@@ -153,9 +137,6 @@ def import_parquet_to_tidb(
                         classification,
                         "VIRUS_TOTAL",  # source
                         row["detection_names"] if row["detection_names"] else None,
-                        scan_date,
-                        positives,
-                        total,
                     )
                 )
 
@@ -191,21 +172,24 @@ def import_parquet_to_tidb(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Import Parquet to TiDB",
+        description="Import Parquet to TiDB with auto-resume",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Port-forward to TiDB first
-  kubectl port-forward -n prod svc/tidb 4000:4000
-
+  # Import from directory (auto-resume supported)
+  python3 import_parquet_to_tidb.py /tmp/parquet_files/ --password mypass
+  
   # Import single file
   python3 import_parquet_to_tidb.py part_0000.parquet --password mypass
 
   # Import with custom batch size
-  python3 import_parquet_to_tidb.py part_0000.parquet --password mypass --batch-size 10000
+  python3 import_parquet_to_tidb.py /tmp/parquet_files/ --password mypass --batch-size 10000
+  
+  # Specify custom progress file location
+  python3 import_parquet_to_tidb.py /tmp/parquet_files/ --password mypass --progress-file /tmp/.import_progress
         """,
     )
-    parser.add_argument("files", nargs="+", help="Parquet files to import")
+    parser.add_argument("paths", nargs="+", help="Parquet file(s) or directory to import")
     parser.add_argument("--host", default="localhost", help="TiDB host (default: localhost)")
     parser.add_argument("--port", type=int, default=4000, help="TiDB port (default: 4000)")
     parser.add_argument("--user", default="root", help="TiDB user (default: root)")
@@ -217,41 +201,102 @@ Examples:
         "--batch-size", type=int, default=5000, help="Batch size (default: 5000)"
     )
     parser.add_argument(
-        "--no-filter",
-        action="store_true",
-        help="Disable classification filtering (import all rows including indifferent/unknown)",
+        "--progress-file", 
+        type=str, 
+        help="Progress file path (default: .import_progress in same directory as files)"
     )
 
     args = parser.parse_args()
 
-    # Check files exist
-    for file in args.files:
-        if not Path(file).exists():
-            print(f"❌ File not found: {file}")
+    # Collect all Parquet files
+    all_files = []
+    base_dir = None
+    
+    for path_str in args.paths:
+        path = Path(path_str)
+        if path.is_dir():
+            base_dir = path
+            # Find all .parquet files in directory
+            parquet_files = sorted(path.glob("*.parquet"))
+            all_files.extend(parquet_files)
+        elif path.exists():
+            all_files.append(path)
+            if base_dir is None:
+                base_dir = path.parent
+        else:
+            print(f"❌ Path not found: {path}")
             sys.exit(1)
 
-    print(f"Found {len(args.files)} file(s) to import")
+    if not all_files:
+        print("❌ No Parquet files found")
+        sys.exit(1)
+    
+    # Determine progress file location
+    if args.progress_file:
+        progress_file = Path(args.progress_file)
+    else:
+        progress_file = base_dir / ".import_progress"
+    
+    # Get completed files
+    completed = get_completed_files(progress_file)
+    
+    # Filter out already completed files
+    to_process = []
+    skipped_count = 0
+    for f in all_files:
+        if f.name in completed:
+            skipped_count += 1
+        else:
+            to_process.append(f)
+    
+    print("="*80)
+    print(f"Import Parquet to TiDB - Auto Resume")
+    print("="*80)
+    print(f"Total files found:     {len(all_files):,}")
+    print(f"Already imported:      {skipped_count:,}")
+    print(f"To process:            {len(to_process):,}")
+    print(f"Progress file:         {progress_file}")
+    print(f"Target:                {args.host}:{args.port}/{args.database}")
+    print("="*80)
+    
+    if not to_process:
+        print("\n✅ All files already imported!")
+        sys.exit(0)
 
     # Import each file
     success_count = 0
-    for file in args.files:
+    for i, file in enumerate(to_process, 1):
+        print(f"\n[{i}/{len(to_process)}] Processing: {file.name}")
+        
         if import_parquet_to_tidb(
-            file,
+            str(file),
             args.host,
             args.port,
             args.user,
             args.password,
             args.database,
             args.batch_size,
-            filter_classifications=not args.no_filter,
         ):
+            # Mark as done
+            mark_file_done(progress_file, file.name)
             success_count += 1
+            print(f"  ✓ Marked {file.name} as completed")
+        else:
+            print(f"  ❌ Failed to import {file.name}")
+            # Don't mark as done, can retry later
 
     print(f"\n{'='*80}")
-    print(f"Import complete: {success_count}/{len(args.files)} files succeeded")
+    print(f"Import complete: {success_count}/{len(to_process)} files succeeded")
+    
+    if success_count < len(to_process):
+        failed = len(to_process) - success_count
+        print(f"⚠️  {failed} file(s) failed - you can re-run to retry")
+    else:
+        print(f"✅ All files imported successfully!")
+    
     print(f"{'='*80}")
 
-    if success_count < len(args.files):
+    if success_count < len(to_process):
         sys.exit(1)
 
 
