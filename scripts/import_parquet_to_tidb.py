@@ -90,14 +90,12 @@ def import_parquet_to_tidb(
         print(f"❌ Connection failed: {e}")
         return False
 
-    # Prepare INSERT statement
+    # Prepare INSERT statement (pure INSERT, no duplicate handling needed)
+    # Note: Parquet files are already deduplicated, and table has UNIQUE constraint
     insert_sql = """
     INSERT INTO ioc_file_hashes 
     (sha256, sha1, md5, classification, source, detection_names)
     VALUES (%s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE
-        classification = VALUES(classification),
-        detection_names = VALUES(detection_names)
     """
 
     # Batch insert
