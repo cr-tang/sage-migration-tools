@@ -130,6 +130,38 @@ prompt_password() {
     fi
     
     log_success "Password received"
+    
+    # Validate connection
+    log_info "Validating TiDB connection..."
+    if kubectl exec -n "$K8S_NAMESPACE" "$K8S_POD" -- \
+        python3 -c "
+import mysql.connector
+try:
+    conn = mysql.connector.connect(
+        host='$TIDB_HOST',
+        port=$TIDB_PORT,
+        user='$TIDB_USER',
+        password='$TIDB_PASSWORD',
+        database='$TIDB_DATABASE',
+        connect_timeout=10,
+        ssl_disabled=True
+    )
+    conn.close()
+    print('OK')
+    exit(0)
+except Exception as e:
+    print(f'ERROR: {e}')
+    exit(1)
+" 2>&1 | grep -q "^OK$"; then
+        log_success "Connection validated successfully!"
+    else
+        log_error "Connection validation failed! Please check:"
+        log_error "  - Password is correct"
+        log_error "  - TiDB host is reachable from busybox"
+        log_error "  - Database '$TIDB_DATABASE' exists"
+        exit 1
+    fi
+    
     echo ""
 }
 
