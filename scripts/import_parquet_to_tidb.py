@@ -90,19 +90,21 @@ def import_parquet_to_tidb(
         print(f"❌ Connection failed: {e}")
         return False
 
-    # Prepare INSERT statement (pure INSERT, no duplicate handling needed)
-    # Note: Parquet files are already deduplicated, and table has UNIQUE constraint
+    # Prepare INSERT statement with IGNORE to skip duplicates silently
+    # Note: Using INSERT IGNORE for safety in case of unexpected duplicates
     insert_sql = """
-    INSERT INTO ioc_file_hashes 
+    INSERT IGNORE INTO ioc_file_hashes 
     (sha256, sha1, md5, classification, source, detection_names)
     VALUES (%s, %s, %s, %s, %s, %s)
     """
 
-    # Batch insert
+    # Batch insert with retry on transient errors
     print(f"[3/3] Inserting data (batch size: {batch_size:,})...")
     t0 = time.time()
     rows_inserted = 0
+    rows_skipped = 0
     errors = 0
+    max_retries = 3
 
     try:
         for i in range(0, len(df), batch_size):
@@ -138,30 +140,57 @@ def import_parquet_to_tidb(
                     )
                 )
 
-            cursor.executemany(insert_sql, values)
-            conn.commit()
+            # Retry logic for transient errors
+            retry_count = 0
+            while retry_count < max_retries:
+                try:
+                    cursor.executemany(insert_sql, values)
+                    conn.commit()
+                    
+                    # Check affected rows (INSERT IGNORE may skip duplicates)
+                    affected = cursor.rowcount
+                    rows_inserted += affected
+                    rows_skipped += len(values) - affected
+                    break  # Success, exit retry loop
+                    
+                except Error as e:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        print(f"\n❌ Batch insert failed after {max_retries} retries: {e}")
+                        errors += len(values)
+                        conn.rollback()
+                        break  # Give up on this batch
+                    else:
+                        print(f"\n⚠️  Retry {retry_count}/{max_retries} for batch at offset {i}: {e}")
+                        time.sleep(1 * retry_count)  # Exponential backoff
+                        conn.rollback()
 
-            rows_inserted += len(values)
             elapsed = time.time() - t0
             rate = rows_inserted / elapsed if elapsed > 0 else 0
-            pct = rows_inserted * 100 // len(df)
+            pct = (i + len(batch)) * 100 // len(df)
 
             print(
                 f"  Progress: {rows_inserted:,}/{len(df):,} ({pct}%) | "
                 f"{rate:.0f} rows/s | "
                 f"{elapsed:.0f}s elapsed"
+                + (f" | {rows_skipped:,} skipped" if rows_skipped > 0 else "")
+                + (f" | {errors:,} errors" if errors > 0 else "")
             )
 
         insert_time = time.time() - t0
         print(f"\n✅ Successfully imported {rows_inserted:,} rows in {insert_time:.1f}s")
         print(f"   Average rate: {rows_inserted/insert_time:.0f} rows/s")
+        if rows_skipped > 0:
+            print(f"   Skipped (duplicates): {rows_skipped:,}")
+        if errors > 0:
+            print(f"   Failed rows: {errors:,}")
 
         cursor.close()
         conn.close()
         return True
 
-    except Error as e:
-        print(f"\n❌ Insert failed: {e}")
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
         conn.rollback()
         cursor.close()
         conn.close()
