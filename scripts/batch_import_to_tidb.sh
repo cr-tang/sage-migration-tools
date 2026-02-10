@@ -206,7 +206,7 @@ upload_and_import() {
             local filename=$(basename "$local_file")
             
             log_info "  [$((processed_count+i-batch_start+1))/${#to_process[@]}] Uploading $filename..."
-            if kubectl cp "$local_file" "${K8S_NAMESPACE}/${K8S_POD}:${K8S_WORK_DIR}/" 2>&1 | grep -v "^$"; then
+            if kubectl cp "$local_file" "${K8S_NAMESPACE}/${K8S_POD}:${K8S_WORK_DIR}/" 2>/dev/null; then
                 ((uploaded_count++))
                 uploaded_files+=("$filename")
             else
