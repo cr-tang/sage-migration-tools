@@ -21,6 +21,7 @@ import time
 import pandas as pd
 from pathlib import Path
 import fcntl
+import os
 
 
 def mark_file_done(progress_file: Path, filename: str):
@@ -51,8 +52,14 @@ def import_parquet_to_tidb(
     password: str,
     database: str,
     batch_size: int = 5000,
+    delete_after_import: bool = False,
 ):
-    """Import a pre-filtered Parquet file to TiDB."""
+    """Import a pre-filtered Parquet file to TiDB.
+    
+    Args:
+        parquet_file: Path to the parquet file
+        delete_after_import: If True, delete the parquet file after successful import
+    """
 
     print(f"\n{'='*80}")
     print(f"Importing: {parquet_file}")
@@ -94,6 +101,28 @@ def import_parquet_to_tidb(
     df['classification_mapped'] = df['classification'].apply(map_classification)
     df['detection_names_clean'] = df['detection_names'].where(df['detection_names'].notna(), None)
     
+    # Process scan_date (string -> date, vectorized)
+    if 'scan_date' in df.columns:
+        df['scan_date_clean'] = pd.to_datetime(df['scan_date'], errors='coerce').dt.date
+    else:
+        df['scan_date_clean'] = None
+    
+    # Process positives and total (int, clamp to 0-255 for TINYINT UNSIGNED)
+    # Use object dtype to allow None (NULL) values mixed with ints
+    if 'positives' in df.columns:
+        df['positives_clean'] = df['positives'].apply(
+            lambda x: int(min(max(x, 0), 255)) if pd.notna(x) else None
+        )
+    else:
+        df['positives_clean'] = None
+    
+    if 'total' in df.columns:
+        df['total_clean'] = df['total'].apply(
+            lambda x: int(min(max(x, 0), 255)) if pd.notna(x) else None
+        )
+    else:
+        df['total_clean'] = None
+    
     prep_time = time.time() - t0_prep
     print(f"  ✓ Preprocessed {len(df):,} rows in {prep_time:.1f}s")
 
@@ -109,6 +138,7 @@ def import_parquet_to_tidb(
             charset="utf8mb4",
             autocommit=False,
             ssl_disabled=True,  # Disable SSL for TiDB
+            connection_timeout=30,  # Increase timeout for VPN connections
         )
         cursor = conn.cursor()
         print(f"  ✓ Connected to database '{database}'")
@@ -117,11 +147,10 @@ def import_parquet_to_tidb(
         return False
 
     # Prepare INSERT statement with IGNORE to skip duplicates silently
-    # Note: Using INSERT IGNORE for safety in case of unexpected duplicates
     insert_sql = """
     INSERT IGNORE INTO ioc_file_hashes 
-    (sha256, sha1, md5, classification, source, detection_names)
-    VALUES (%s, %s, %s, %s, %s, %s)
+    (sha256, sha1, md5, classification, source, detection_names, scan_date, positives, total)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     # Batch insert with retry on transient errors
@@ -143,7 +172,10 @@ def import_parquet_to_tidb(
                 batch['md5_bin'],
                 batch['classification_mapped'],
                 ['VIRUS_TOTAL'] * len(batch),  # source
-                batch['detection_names_clean']
+                batch['detection_names_clean'],
+                batch['scan_date_clean'],
+                batch['positives_clean'],
+                batch['total_clean'],
             ))
 
             # Retry logic for transient errors
@@ -193,6 +225,15 @@ def import_parquet_to_tidb(
 
         cursor.close()
         conn.close()
+        
+        # Delete file after successful import if requested
+        if delete_after_import:
+            try:
+                os.remove(parquet_file)
+                print(f"  🗑️  Deleted {parquet_file}")
+            except Exception as e:
+                print(f"  ⚠️  Failed to delete {parquet_file}: {e}")
+        
         return True
 
     except Exception as e:
@@ -237,6 +278,11 @@ Examples:
         "--progress-file", 
         type=str, 
         help="Progress file path (default: .import_progress in same directory as files)"
+    )
+    parser.add_argument(
+        "--delete-after-import",
+        action="store_true",
+        help="Delete parquet files after successful import (useful for saving space in busybox)"
     )
 
     args = parser.parse_args()
@@ -309,6 +355,7 @@ Examples:
             args.password,
             args.database,
             args.batch_size,
+            args.delete_after_import,
         ):
             # Mark as done
             mark_file_done(progress_file, file.name)

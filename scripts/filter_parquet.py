@@ -47,7 +47,6 @@ def filter_one_file(input_file: Path, output_dir: Path):
     """Filter a single parquet file."""
     basename = input_file.stem  # e.g., "part_0001"
     output_file = output_dir / f"{basename}_filtered.parquet"
-    null_file = output_dir / f"{basename}_null.parquet"
     
     # Read
     try:
@@ -58,7 +57,10 @@ def filter_one_file(input_file: Path, output_dir: Path):
     
     total = len(table)
     
-    # Filter: keep malware/ransomware/unwanted/hacktool
+    # Filter: keep threat-relevant classifications
+    # VT Classifier V2 ML model outputs 5 classifications:
+    #   malware, ransomware, unwanted, hacktool, indifferent
+    # We drop 'indifferent' (ML-determined benign) and NULL (no classification)
     keep_set = {'malware', 'ransomware', 'unwanted', 'hacktool'}
     cls = table.column('classification')
     
@@ -66,23 +68,12 @@ def filter_one_file(input_file: Path, output_dir: Path):
     keep_table = table.filter(keep_mask)
     keep_count = len(keep_table)
     
-    # NULL - only keep SHA1 and scan_date columns for review
-    null_mask = pa.compute.is_null(cls)
-    null_table = table.filter(null_mask)
-    null_count = len(null_table)
-    
     # Write
     try:
         pq.write_table(keep_table, output_file, compression='zstd', compression_level=3)
         
-        # Write NULL file with only SHA1 and scan_date (lightweight)
-        if null_count > 0:
-            null_minimal = null_table.select(['sha1', 'scan_date'])
-            pq.write_table(null_minimal, null_file, compression='zstd', compression_level=3)
-        
         keep_pct = keep_count / total * 100 if total > 0 else 0
-        null_pct = null_count / total * 100 if total > 0 else 0
-        print(f"  ✓ {input_file.name}: kept {keep_count:,}/{total:,} ({keep_pct:.1f}%), null {null_count:,} ({null_pct:.1f}%)")
+        print(f"  ✓ {input_file.name}: kept {keep_count:,}/{total:,} ({keep_pct:.1f}%)")
         return True
     except Exception as e:
         print(f"  ❌ Failed to write {output_file.name}: {e}")
@@ -105,7 +96,7 @@ def main():
     print("=" * 70)
     print(f"Input:    {input_dir}")
     print(f"Output:   {output_dir}")
-    print(f"Note:     NULL classifications saved as *_null.parquet (SHA1 + scan_date only)")
+    print(f"Keep:     malware, ransomware, unwanted, hacktool")
     print()
     
     # Get completed backfill files

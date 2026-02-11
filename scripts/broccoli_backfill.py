@@ -153,8 +153,8 @@ async def lookup_classifications(
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
-                            response = data.get("response", {})
-                            results[sha1] = response.get("class")
+                            # GCS returns flat JSON: {"classification": "malware", ...}
+                            results[sha1] = data.get("classification")
                             success = True
                             break
                         elif resp.status == 404:
