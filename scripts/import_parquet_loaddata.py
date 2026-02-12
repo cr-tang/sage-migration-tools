@@ -56,6 +56,60 @@ def map_classification(cls):
     return "UNKNOWN"
 
 
+CHUNK_SIZE = 150_000  # rows per LOAD DATA chunk (~150MB with full detection_names)
+MAX_RETRIES = 3
+
+
+def load_data_chunk(csv_path, host, port, user, password, database):
+    """Execute LOAD DATA for a single CSV chunk with retry."""
+    load_sql = """
+    LOAD DATA LOCAL INFILE %s
+    IGNORE INTO TABLE ioc_file_hashes
+    FIELDS TERMINATED BY '\t'
+    LINES TERMINATED BY '\n'
+    (@sha256_hex, @sha1_hex, @md5_hex, classification, source,
+     detection_names, scan_date, positives, total)
+    SET
+        sha256 = UNHEX(@sha256_hex),
+        sha1 = UNHEX(@sha1_hex),
+        md5 = UNHEX(@md5_hex)
+    """
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            conn = mysql.connector.connect(
+                host=host, port=port, user=user, password=password,
+                database=database, charset="utf8mb4", autocommit=False,
+                ssl_disabled=True, connection_timeout=30,
+                allow_local_infile=True,
+            )
+            cursor = conn.cursor()
+            cursor.execute("SET @@session.tidb_constraint_check_in_place = 0")
+            cursor.execute(load_sql, (csv_path,))
+            conn.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            conn.close()
+            return affected
+        except Error as e:
+            if attempt < MAX_RETRIES:
+                wait = 5 * attempt
+                print(f"    ⚠️  Chunk failed (attempt {attempt}/{MAX_RETRIES}): {e}")
+                print(f"    Retrying in {wait}s...")
+                time.sleep(wait)
+                try:
+                    conn.close()
+                except:
+                    pass
+            else:
+                print(f"    ❌ Chunk failed after {MAX_RETRIES} attempts: {e}")
+                try:
+                    conn.close()
+                except:
+                    pass
+                raise
+
+
 def import_parquet_loaddata(
     parquet_file: str,
     host: str,
@@ -65,7 +119,7 @@ def import_parquet_loaddata(
     database: str,
     delete_after_import: bool = False,
 ):
-    """Import a Parquet file to TiDB via LOAD DATA LOCAL INFILE."""
+    """Import a Parquet file to TiDB via chunked LOAD DATA LOCAL INFILE."""
 
     basename = os.path.basename(parquet_file)
     print(f"\n{'='*80}")
@@ -73,7 +127,7 @@ def import_parquet_loaddata(
     print(f"{'='*80}")
 
     # ── Step 1: Read Parquet ──
-    print(f"[1/4] Reading Parquet file...")
+    print(f"[1/3] Reading Parquet file...")
     t0 = time.time()
     try:
         df = pq.read_table(parquet_file).to_pandas()
@@ -85,31 +139,25 @@ def import_parquet_loaddata(
     print(f"  ✓ Read {total_rows:,} rows in {time.time()-t0:.1f}s")
 
     # ── Step 2: Preprocess (vectorized, fast) ──
-    print(f"[2/4] Preprocessing...")
+    print(f"[2/3] Preprocessing...")
     t1 = time.time()
 
-    # Classification mapping (vectorized)
-    df['cls'] = df['classification'].map(
-        lambda x: map_classification(x)
-    )
+    df['cls'] = df['classification'].map(lambda x: map_classification(x))
 
-    # detection_names: truncate to 500 chars, escape tabs/newlines
     def clean_detection(x):
         if pd.isna(x) or not x:
-            return "\\N"  # MySQL NULL
-        s = str(x)[:500]
+            return "\\N"
+        s = str(x)
         return s.replace('\\', '\\\\').replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
 
     df['det'] = df['detection_names'].map(clean_detection)
 
-    # scan_date → YYYY-MM-DD or \N
     if 'scan_date' in df.columns:
         dates = pd.to_datetime(df['scan_date'], errors='coerce')
         df['sd'] = dates.dt.strftime('%Y-%m-%d').fillna("\\N")
     else:
         df['sd'] = "\\N"
 
-    # positives/total → clamp 0-255 or \N
     for col, out in [('positives', 'pos'), ('total', 'tot')]:
         if col in df.columns:
             df[out] = df[col].apply(
@@ -118,124 +166,67 @@ def import_parquet_loaddata(
         else:
             df[out] = "\\N"
 
-    # sha256/sha1/md5: keep as hex strings (UNHEX on server side)
     for h in ('sha256', 'sha1', 'md5'):
         df[h] = df[h].fillna('')
 
-    print(f"  ✓ Preprocessed in {time.time()-t1:.1f}s")
-
-    # ── Step 3: Write CSV (tab-separated) ──
-    print(f"[3/4] Writing temp CSV...")
-    t2 = time.time()
-
-    # Build output dataframe with exact column order for LOAD DATA
+    # Build output dataframe
     out_df = df[['sha256', 'sha1', 'md5', 'cls', 'det', 'sd', 'pos', 'tot']].copy()
-    # Add constant 'source' column
     out_df.insert(3, 'source', 'VIRUS_TOTAL')
 
-    # Write to temp file (tab-separated, no header, no index, no quoting)
-    tmp_csv = tempfile.NamedTemporaryFile(
-        mode='w', suffix='.csv', prefix='tidb_load_',
-        dir='/tmp', delete=False
-    )
-    csv_path = tmp_csv.name
-    tmp_csv.close()
+    print(f"  ✓ Preprocessed in {time.time()-t1:.1f}s")
 
-    # Use to_csv for vectorized fast writing
-    out_df.to_csv(csv_path, sep='\t', header=False, index=False,
-                  na_rep='\\N', escapechar=None, quoting=3)  # QUOTE_NONE=3
-
-    csv_size_mb = os.path.getsize(csv_path) / 1024 / 1024
-    print(f"  ✓ Wrote {csv_size_mb:.0f} MB CSV in {time.time()-t2:.1f}s")
-
-    # ── Step 4: LOAD DATA LOCAL INFILE ──
-    print(f"[4/4] LOAD DATA LOCAL INFILE → TiDB ({host}:{port})...")
+    # ── Step 3: Chunked LOAD DATA ──
+    num_chunks = (total_rows + CHUNK_SIZE - 1) // CHUNK_SIZE
+    print(f"[3/3] LOAD DATA in {num_chunks} chunks ({CHUNK_SIZE:,} rows each) → {host}:{port}...")
     t3 = time.time()
 
-    try:
-        conn = mysql.connector.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            database=database,
-            charset="utf8mb4",
-            autocommit=False,
-            ssl_disabled=True,
-            connection_timeout=30,
-            allow_local_infile=True,
-        )
-        cursor = conn.cursor()
+    total_inserted = 0
+    failed_chunks = 0
 
-        # Defer constraint check for faster bulk inserts
-        cursor.execute("SET @@session.tidb_constraint_check_in_place = 0")
+    for chunk_idx in range(num_chunks):
+        start = chunk_idx * CHUNK_SIZE
+        end = min(start + CHUNK_SIZE, total_rows)
+        chunk_df = out_df.iloc[start:end]
+        chunk_rows = len(chunk_df)
 
-        load_sql = """
-        LOAD DATA LOCAL INFILE %s
-        IGNORE INTO TABLE ioc_file_hashes
-        FIELDS TERMINATED BY '\t'
-        LINES TERMINATED BY '\n'
-        (@sha256_hex, @sha1_hex, @md5_hex, classification, source,
-         detection_names, scan_date, positives, total)
-        SET
-            sha256 = UNHEX(@sha256_hex),
-            sha1 = UNHEX(@sha1_hex),
-            md5 = UNHEX(@md5_hex)
-        """
+        # Write chunk to temp CSV
+        csv_path = f"/tmp/tidb_chunk_{os.getpid()}_{chunk_idx}.csv"
+        chunk_df.to_csv(csv_path, sep='\t', header=False, index=False,
+                        na_rep='\\N', escapechar=None, quoting=3)
 
-        cursor.execute(load_sql, (csv_path,))
-        conn.commit()
-
-        # For LOAD DATA ... IGNORE:
-        #   rowcount = actually inserted rows (duplicates are skipped)
-        #   Note: in some drivers, rowcount may include skipped rows.
-        #   Use SHOW WARNINGS count or info string for accurate numbers.
-        affected = cursor.rowcount
-
-        # Parse the info string for accurate counts if available
-        # TiDB returns: "Records: N  Deleted: 0  Skipped: M  Warnings: W"
-        info = cursor._info if hasattr(cursor, '_info') else None
-        if info and isinstance(info, str) and 'Records' in info:
-            import re
-            records_m = re.search(r'Records:\s*(\d+)', info)
-            skipped_m = re.search(r'Skipped:\s*(\d+)', info)
-            records = int(records_m.group(1)) if records_m else total_rows
-            skipped = int(skipped_m.group(1)) if skipped_m else 0
-            new_rows = records - skipped
-        else:
-            # Fallback: affected rows from LOAD DATA IGNORE is the inserted count
-            new_rows = affected
-            skipped = total_rows - affected
-
-        load_time = time.time() - t3
-        total_time = time.time() - t0
-
-        print(f"\n✅ LOAD DATA completed!")
-        print(f"   Rows in file:     {total_rows:,}")
-        print(f"   Rows inserted:    {new_rows:,}")
-        print(f"   Duplicates:       {skipped:,}")
-        print(f"   Load time:        {load_time:.1f}s ({total_rows/load_time:,.0f} rows/s)")
-        print(f"   Total time:       {total_time:.1f}s (incl. read+preprocess+csv)")
-
-        cursor.close()
-        conn.close()
-
-    except Error as e:
-        print(f"❌ LOAD DATA failed: {e}")
-        # Clean up temp file
         try:
-            os.unlink(csv_path)
-        except:
-            pass
-        return False
+            affected = load_data_chunk(csv_path, host, port, user, password, database)
+            total_inserted += affected
+            elapsed = time.time() - t3
+            rate = total_inserted / elapsed if elapsed > 0 else 0
+            pct = end * 100 // total_rows
+            print(f"  Chunk {chunk_idx+1}/{num_chunks}: {chunk_rows:,} rows | "
+                  f"Total: {total_inserted:,}/{total_rows:,} ({pct}%) | "
+                  f"{rate:,.0f} rows/s")
+        except Error:
+            failed_chunks += 1
+            print(f"  ❌ Chunk {chunk_idx+1}/{num_chunks} permanently failed, skipping")
+        finally:
+            try:
+                os.unlink(csv_path)
+            except:
+                pass
 
-    # Clean up temp CSV
-    try:
-        os.unlink(csv_path)
-    except:
-        pass
+    load_time = time.time() - t3
+    total_time = time.time() - t0
 
-    # Delete source parquet if requested
+    if failed_chunks > 0:
+        print(f"\n⚠️  Completed with {failed_chunks} failed chunks")
+        print(f"   Rows inserted:    {total_inserted:,}/{total_rows:,}")
+        print(f"   Load time:        {load_time:.1f}s")
+        print(f"   Total time:       {total_time:.1f}s")
+        return False  # Don't mark as done so it can be retried
+    else:
+        print(f"\n✅ LOAD DATA completed!")
+        print(f"   Rows inserted:    {total_inserted:,}")
+        print(f"   Load time:        {load_time:.1f}s ({total_rows/load_time:,.0f} rows/s)")
+        print(f"   Total time:       {total_time:.1f}s")
+
     if delete_after_import:
         try:
             os.remove(parquet_file)
