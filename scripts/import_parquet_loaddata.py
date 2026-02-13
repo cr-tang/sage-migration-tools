@@ -82,6 +82,7 @@ def load_data_chunk(csv_path, host, port, user, password, database):
                 database=database, charset="utf8mb4", autocommit=False,
                 ssl_disabled=True, connection_timeout=30,
                 allow_local_infile=True,
+                compress=True,  # zlib protocol compression for faster VPN transfer
             )
             cursor = conn.cursor()
             cursor.execute("SET @@session.tidb_constraint_check_in_place = 0")
