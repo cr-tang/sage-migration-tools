@@ -31,7 +31,7 @@
 │   │   ├── parallel_bson_processor.py  # Process file_rep BSON dumps → NDJSON
 │   │   ├── domain_bson_processor.py    # Process domain_classification BSON → NDJSON
 │   │   ├── file_rep_importer.py        # Import file_rep NDJSON → TiDB (legacy)
-│   │   ├── domain_importer.py          # Import domain NDJSON → TiDB
+│   │   ├── domain_importer.py          # Import domain NDJSON → TiDB (legacy)
 │   │   ├── vt_feeder_importer.py       # Import VT feeder data (legacy)
 │   │   ├── import_task_manager.py      # Task manager for imports (legacy)
 │   │   └── requirements.txt            # Python dependencies
@@ -54,31 +54,13 @@
 │       └── file_rep_import.log         # File rep import log
 ```
 
-## Local Machine (Tang's Mac)
-
-### Files
-
-```
-~/Downloads/
-├── vt_filtered_batch/                  # Downloaded filtered parquet files
-│   ├── part_0000_filtered.parquet      # 509 files (~160 GB total)
-│   ├── ...
-│   ├── part_0508_filtered.parquet
-│   ├── .import_progress_local          # Import progress tracking
-│   └── .upload_progress                # OCI upload progress tracking
-│
-└── mongodump_parquet/                  # Converted MongoDB dump
-    └── mongodump_all.parquet           # 376K rows, 214 MB (historical file_rep)
-```
-
-### Scripts (sage-migration-tools repo)
+## Scripts (sage-migration-tools repo)
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
 | `scripts/import_parquet_loaddata.py` | Import parquet files into TiDB via LOAD DATA | `python import_parquet_loaddata.py *.parquet --host HOST --password PASS` |
-| `scripts/upload_to_oci.sh` | Upload parquet files to OCI Object Storage | `./upload_to_oci.sh --parallel 4` |
+| `scripts/upload_to_oci.sh` | Upload parquet files to OCI Object Storage | `./upload_to_oci.sh --parallel 4 --prefix vt_data/` |
 | `scripts/domain_bson_processor.py` | Process domain_classification BSON from GCS | `python domain_bson_processor.py --shard r01` |
-| `scripts/domain_importer.py` | Import domain NDJSON into TiDB | `python domain_importer.py --input FILE --host HOST` |
 | `scripts/convert_mongodump_to_parquet.py` | Convert MongoDB dump NDJSON to Parquet | `python convert_mongodump_to_parquet.py` |
 
 ## GCS Buckets
@@ -93,7 +75,18 @@
 
 | Namespace | Bucket | Region | Contents |
 |-----------|--------|--------|----------|
-| id9uy08ld7kh | vt-raw-data-tidb | us-ashburn-1 | Filtered parquet files (for TiDB import bypass) |
+| id9uy08ld7kh | vt-raw-data-tidb | us-ashburn-1 | VT and MongoDB data for TiDB import |
+
+```
+vt-raw-data-tidb/
+├── vt_data/                            # VT filtered parquet files
+│   ├── part_0000_filtered.parquet      # 509 files (~160 GB total)
+│   ├── ...
+│   └── part_0508_filtered.parquet
+│
+└── mongo_data/                         # MongoDB dump converted data
+    └── mongodump_all.parquet           # 376K rows, 214 MB (historical file_rep)
+```
 
 ## TiDB
 
@@ -109,17 +102,18 @@ GCS (vt-file-feeder-by-date)
   → vt_parquet_exporter.py (on VM)       # Export raw parquet (509 files)
   → broccoli_backfill.py (on VM)         # Backfill ML classification
   → filter_parquet.py (on VM)            # Filter low-value records
-  → scp to local Mac (TLV VPN)           # Download filtered files
+  → upload_to_oci.sh → OCI bucket         # Upload to vt_data/
   → import_parquet_loaddata.py (JPN VPN) # LOAD DATA into TiDB
   → Re-add indexes (sha1, md5)           # After all imports complete
 
 GCS (sage_prod_dump)
   → parallel_bson_processor.py (on VM)   # Process file_rep BSON → NDJSON
-  → convert_mongodump_to_parquet.py      # Convert to Parquet (on local)
+  → convert_mongodump_to_parquet.py      # Convert to Parquet
+  → upload to OCI bucket → mongo_data/   # Upload to mongo_data/
   → import_parquet_loaddata.py           # Import into TiDB
 
   → domain_bson_processor.py (on VM)     # Process domain BSON → NDJSON
-  → domain_importer.py                   # Import into TiDB
+  → domain_importer.py (legacy)          # Import into TiDB
 ```
 
 ## VPN Constraints
