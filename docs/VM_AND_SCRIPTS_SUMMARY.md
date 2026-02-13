@@ -116,11 +116,11 @@ GCS (sage_prod_dump)
   → domain_importer.py (legacy)          # Import into TiDB
 ```
 
-## VPN Constraints
+## VPN Access
 
-| VPN | Access |
-|-----|--------|
-| TLV | GCP VM (phoenix-vtfeeder) for downloading |
-| JPN | TiDB (tidb-stg-ap-tokyo-1) for importing |
+| VPN | GCP VM | TiDB | OCI |
+|-----|--------|------|-----|
+| TLV | ✅ | ❌ | ✅ |
+| JPN | ✅ | ✅ | ✅ |
 
-Download and import **cannot run simultaneously** — requires VPN switching.
+JPN VPN can access both GCP VM and TiDB — download and import can run simultaneously.
