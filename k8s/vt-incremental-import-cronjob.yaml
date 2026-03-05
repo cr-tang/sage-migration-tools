@@ -63,15 +63,50 @@ spec:
               # Install dependencies
               pip install -q google-cloud-storage pyarrow pandas mysql-connector-python oci
               
-              # Calculate target date (2 days ago)
-              TARGET_DATE=$(date -u -d '2 days ago' +%Y-%m-%d)
-              echo "Target date: $TARGET_DATE"
-              
-              # Check if date already processed
-              if gsutil -q stat "gs://${OCI_BUCKET}/vt_data_incremental/${TARGET_DATE}/"; then
-                echo "✅ Date ${TARGET_DATE} already processed, skipping"
-                exit 0
+              # Determine target date
+              # If START_DATE is set, process from there sequentially
+              # Otherwise, process 2 days ago (default behavior)
+              if [ -n "$START_DATE" ]; then
+                # Find next unprocessed date starting from START_DATE
+                CURRENT_DATE="$START_DATE"
+                MAX_ATTEMPTS=30  # Check up to 30 days ahead
+                
+                for i in $(seq 0 $MAX_ATTEMPTS); do
+                  CHECK_DATE=$(date -u -d "$START_DATE + $i days" +%Y-%m-%d)
+                  
+                  # Check if this date exists in GCS source bucket
+                  if ! gsutil -q ls "gs://vt-file-feeder-by-date/${CHECK_DATE}/" 2>/dev/null; then
+                    echo "⏭️  Date ${CHECK_DATE} not available in source bucket yet"
+                    exit 0
+                  fi
+                  
+                  # Check if already processed
+                  if gsutil -q ls "gs://${OCI_BUCKET}/vt_data_incremental/${CHECK_DATE}/" 2>/dev/null; then
+                    echo "⏭️  Date ${CHECK_DATE} already processed, checking next..."
+                    continue
+                  fi
+                  
+                  # Found unprocessed date
+                  TARGET_DATE="$CHECK_DATE"
+                  break
+                done
+                
+                if [ -z "$TARGET_DATE" ]; then
+                  echo "✅ All dates from $START_DATE processed or not available yet"
+                  exit 0
+                fi
+              else
+                # Default: process 2 days ago
+                TARGET_DATE=$(date -u -d '2 days ago' +%Y-%m-%d)
+                
+                # Check if already processed
+                if gsutil -q ls "gs://${OCI_BUCKET}/vt_data_incremental/${TARGET_DATE}/" 2>/dev/null; then
+                  echo "✅ Date ${TARGET_DATE} already processed, skipping"
+                  exit 0
+                fi
               fi
+              
+              echo "Target date: $TARGET_DATE"
               
               # Create working directory
               mkdir -p /tmp/vt_import
@@ -116,6 +151,12 @@ spec:
               date
             
             env:
+            # Start date for incremental import (YYYY-MM-DD)
+            # Set this to the first date to process (e.g., "20260209")
+            # Leave empty to process 2 days ago (default behavior)
+            - name: START_DATE
+              value: "20260209"  # TODO: Update this to next unprocessed date
+            
             # GCS config
             - name: GCS_BUCKET
               value: "vt-file-feeder-by-date"

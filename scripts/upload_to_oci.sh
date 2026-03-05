@@ -48,6 +48,30 @@ echo "Prefix:  ${PREFIX:-<root>}"
 echo "Parallel: $PARALLEL"
 echo ""
 
+# Sync progress file with bucket: check what's already uploaded
+echo "Checking existing objects in bucket..."
+EXISTING=$(mktemp)
+oci os object list \
+    --namespace-name "$NAMESPACE" \
+    --bucket-name "$BUCKET" \
+    --region "$REGION" \
+    --profile "$PROFILE" \
+    --auth "$AUTH" \
+    --prefix "${PREFIX}" \
+    --all \
+    --query "data[].name" \
+    --output table 2>/dev/null | grep '\.parquet' | awk '{gsub(/[| ]/, "", $0); n=split($0, a, "/"); print a[n]}' | sort -u > "$EXISTING"
+
+BUCKET_COUNT=$(wc -l < "$EXISTING" | tr -d ' ')
+echo "Objects already in bucket: $BUCKET_COUNT"
+
+# Merge bucket objects into progress file (avoid re-uploading)
+if [ "$BUCKET_COUNT" -gt 0 ]; then
+    cat "$EXISTING" >> "$PROGRESS_FILE"
+    sort -u -o "$PROGRESS_FILE" "$PROGRESS_FILE"
+fi
+rm -f "$EXISTING"
+
 # Find all parquet files not yet uploaded
 TOTAL=$(ls "$SOURCE_DIR"/*.parquet 2>/dev/null | wc -l | tr -d ' ')
 DONE=$(wc -l < "$PROGRESS_FILE" | tr -d ' ')

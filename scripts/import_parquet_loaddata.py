@@ -92,7 +92,7 @@ def load_data_chunk(csv_path, host, port, user, password, database):
             cursor.close()
             conn.close()
             return affected
-        except Error as e:
+        except Exception as e:
             if attempt < MAX_RETRIES:
                 wait = 5 * attempt
                 print(f"    ⚠️  Chunk failed (attempt {attempt}/{MAX_RETRIES}): {e}")

@@ -140,14 +140,40 @@ Edit `vt-incremental-import-cronjob.yaml`:
 spec:
   schedule: "0 2 * * *"
 
-# Change target date offset (default: 2 days ago)
-TARGET_DATE=$(date -u -d '2 days ago' +%Y-%m-%d)
+# Set start date for catching up from a specific date
+# If set, processes dates sequentially from START_DATE onwards
+# If empty, processes 2 days ago (default behavior)
+env:
+  - name: START_DATE
+    value: "20260209"  # Start from Feb 9, 2026
 
 # Change resource limits
 resources:
   requests:
     memory: "4Gi"
     cpu: "2"
+```
+
+### Catch-up Mode
+
+If you're behind and need to process multiple dates:
+
+1. Set `START_DATE` to the first unprocessed date (e.g., `20260209`)
+2. CronJob will process one date per run, starting from `START_DATE`
+3. Each run automatically finds the next unprocessed date
+4. Once caught up, set `START_DATE` to empty for normal 2-days-ago behavior
+
+Example:
+```bash
+# Edit the CronJob
+kubectl edit cronjob vt-incremental-import -n phoenix
+
+# Find START_DATE and set it:
+#   - name: START_DATE
+#     value: "20260209"
+
+# Save and exit
+# Next run will process 20260209, then 20260210, etc.
 ```
 
 ## Monitoring
