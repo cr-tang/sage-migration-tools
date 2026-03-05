@@ -1,0 +1,185 @@
+---
+# VT Incremental Import CronJob
+# Runs daily at 02:00 UTC to sync VT data from 2 days ago
+#
+# What it does:
+# 1. Export VT data from GCS vt-file-feeder-by-date (2 days ago)
+# 2. Filter parquet files
+# 3. Upload to OCI bucket
+# 4. Import to TiDB
+#
+# Deploy:
+#   kubectl apply -f vt-incremental-import-cronjob.yaml
+#
+# Manual trigger:
+#   kubectl create job --from=cronjob/vt-incremental-import vt-manual-run-$(date +%s) -n phoenix
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vt-incremental-import
+  namespace: phoenix
+spec:
+  # Run daily at 02:00 UTC (10:00 JST)
+  schedule: "0 2 * * *"
+  
+  # Keep last 3 successful and 1 failed job for debugging
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  
+  # Don't start new job if previous one is still running
+  concurrencyPolicy: Forbid
+  
+  jobTemplate:
+    spec:
+      # Allow 6 hours for completion
+      activeDeadlineSeconds: 21600
+      
+      template:
+        metadata:
+          labels:
+            app: vt-incremental-import
+            component: data-sync
+        
+        spec:
+          restartPolicy: OnFailure
+          
+          # Use GCP service account for GCS access
+          serviceAccountName: phoenix-gcp-sa  # TODO: Create this SA with GCS read permissions
+          
+          containers:
+          - name: vt-import
+            image: python:3.11-slim
+            
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              
+              echo "=== VT Incremental Import ==="
+              date
+              
+              # Install dependencies
+              pip install -q google-cloud-storage pyarrow pandas mysql-connector-python oci
+              
+              # Calculate target date (2 days ago)
+              TARGET_DATE=$(date -u -d '2 days ago' +%Y-%m-%d)
+              echo "Target date: $TARGET_DATE"
+              
+              # Check if date already processed
+              if gsutil -q stat "gs://${OCI_BUCKET}/vt_data_incremental/${TARGET_DATE}/"; then
+                echo "✅ Date ${TARGET_DATE} already processed, skipping"
+                exit 0
+              fi
+              
+              # Create working directory
+              mkdir -p /tmp/vt_import
+              cd /tmp/vt_import
+              
+              # Download scripts from git repo
+              git clone --depth 1 https://github.com/cr-tang/sage-migration-tools.git
+              cd sage-migration-tools/scripts
+              
+              # 1. Export from GCS
+              echo "[1/4] Exporting ${TARGET_DATE} from GCS..."
+              python3 vt_parquet_exporter.py \
+                --bucket ${GCS_BUCKET} \
+                --date ${TARGET_DATE} \
+                --output-dir /tmp/vt_export
+              
+              # 2. Filter parquet files
+              echo "[2/4] Filtering parquet files..."
+              python3 filter_parquet.py \
+                --input-dir /tmp/vt_export \
+                --output-dir /tmp/vt_filtered \
+                --parallel 2
+              
+              # 3. Upload to OCI
+              echo "[3/4] Uploading to OCI..."
+              python3 upload_to_oci.py \
+                --dir /tmp/vt_filtered \
+                --prefix "vt_data_incremental/${TARGET_DATE}/" \
+                --parallel 2
+              
+              # 4. Import to TiDB
+              echo "[4/4] Importing to TiDB..."
+              python3 import_parquet_loaddata.py \
+                --host ${TIDB_HOST} \
+                --port ${TIDB_PORT} \
+                --user ${TIDB_USER} \
+                --password ${TIDB_PASSWORD} \
+                --database ${TIDB_DATABASE} \
+                /tmp/vt_filtered/*.parquet
+              
+              echo "✅ Import complete for ${TARGET_DATE}"
+              date
+            
+            env:
+            # GCS config
+            - name: GCS_BUCKET
+              value: "vt-file-feeder-by-date"
+            
+            # OCI config (from secret)
+            - name: OCI_BUCKET
+              value: "vt-raw-data-tidb"
+            - name: OCI_NAMESPACE
+              value: "id9uy08ld7kh"
+            - name: OCI_REGION
+              value: "us-ashburn-1"
+            
+            # TiDB config (from secret)
+            - name: TIDB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: tidb-credentials
+                  key: host
+            - name: TIDB_PORT
+              value: "4000"
+            - name: TIDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: tidb-credentials
+                  key: user
+            - name: TIDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tidb-credentials
+                  key: password
+            - name: TIDB_DATABASE
+              value: "threat_intel"
+            
+            resources:
+              requests:
+                memory: "4Gi"
+                cpu: "2"
+              limits:
+                memory: "8Gi"
+                cpu: "4"
+            
+            volumeMounts:
+            - name: oci-config
+              mountPath: /root/.oci
+              readOnly: true
+          
+          volumes:
+          - name: oci-config
+            secret:
+              secretName: oci-credentials
+
+---
+# TiDB credentials secret
+# Create with:
+#   kubectl create secret generic tidb-credentials \
+#     --from-literal=host=tidb-stg-ap-tokyo-1.cybereason.net \
+#     --from-literal=user=root \
+#     --from-literal=password=YOUR_PASSWORD \
+#     -n phoenix
+
+---
+# OCI credentials secret
+# Create with:
+#   kubectl create secret generic oci-credentials \
+#     --from-file=config=/Users/tangxin/.oci/config \
+#     --from-file=key=/Users/tangxin/.oci/sessions/dev/oci_api_key.pem \
+#     -n phoenix
