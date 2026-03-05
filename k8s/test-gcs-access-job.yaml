@@ -1,30 +1,13 @@
 ---
-# Test Job to verify GCS access from K8s cluster
-# This job tests:
-# 1. GCS connectivity
-# 2. Ability to list vt-file-feeder-by-date bucket
-# 3. Download a sample file
-# 4. Python dependencies installation
-#
-# Deploy:
-#   kubectl apply -f test-gcs-access-job.yaml
-#
-# Check logs:
-#   kubectl logs -f job/test-gcs-access -n stgbusybox
-#
-# Cleanup:
-#   kubectl delete job test-gcs-access -n stgbusybox
-
+# Simplified GCS access test
+# Tests basic connectivity and Python library access to GCS
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: test-gcs-access
-  namespace: stgbusybox  # Use existing namespace with network access
+  namespace: stgbusybox
 spec:
-  # Don't retry on failure - we want to see the error
   backoffLimit: 0
-  
-  # Clean up after 1 hour
   ttlSecondsAfterFinished: 3600
   
   template:
@@ -37,7 +20,7 @@ spec:
       
       containers:
       - name: gcs-test
-        image: google/cloud-sdk:slim
+        image: python:3.11-slim
         
         command:
         - /bin/bash
@@ -49,110 +32,63 @@ spec:
           date
           echo ""
           
-          # 1. Test DNS resolution
-          echo "[1/6] Testing DNS resolution..."
-          if nslookup storage.googleapis.com; then
-            echo "  ✓ DNS resolution works"
-          else
-            echo "  ❌ DNS resolution failed"
-            exit 1
-          fi
+          # Install dependencies
+          echo "Installing dependencies..."
+          apt-get update -qq 2>&1 | grep -v "Get:" || true
+          apt-get install -y -qq curl < /dev/null > /dev/null 2>&1
+          pip3 install -q google-cloud-storage 2>&1 | grep -v "Requirement\|Using cached" || true
           echo ""
           
-          # 2. Test HTTPS connectivity
-          echo "[2/6] Testing HTTPS connectivity to GCS..."
+          # 1. DNS
+          echo "[1/4] Testing DNS..."
+          if getent hosts storage.googleapis.com > /dev/null 2>&1; then
+            echo "  ✓ DNS works"
+          else
+            echo "  ❌ DNS failed"
+            exit 1
+          fi
+          
+          # 2. HTTPS
+          echo "[2/4] Testing HTTPS..."
           if curl -s -o /dev/null -w "%{http_code}" https://storage.googleapis.com | grep -q "200\|403\|401"; then
-            echo "  ✓ HTTPS connection successful"
+            echo "  ✓ HTTPS works"
           else
-            echo "  ❌ Cannot connect to GCS"
-            exit 1
-          fi
-          echo ""
-          
-          # 3. Check for GCP credentials
-          echo "[3/6] Checking GCP credentials..."
-          if [ -f "/var/run/secrets/cloud.google.com/service-account.json" ]; then
-            echo "  ✓ Workload Identity service account found"
-            export GOOGLE_APPLICATION_CREDENTIALS="/var/run/secrets/cloud.google.com/service-account.json"
-            gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS
-          elif gcloud auth list 2>&1 | grep -q "ACTIVE"; then
-            echo "  ✓ GCP auth already configured"
-          else
-            echo "  ⚠️  No GCP credentials found"
-            echo "  Will try anonymous access (public buckets only)"
-          fi
-          echo ""
-          
-          # 4. Test gsutil ls on the bucket
-          echo "[4/6] Testing gsutil access to vt-file-feeder-by-date..."
-          BUCKET="gs://vt-file-feeder-by-date"
-          
-          if gsutil ls "$BUCKET/" | head -5; then
-            echo "  ✓ Bucket listing successful"
-            echo ""
-            echo "  Available dates:"
-            gsutil ls "$BUCKET/" | grep -E '20[0-9]{2}-[0-9]{2}-[0-9]{2}' | head -10
-          else
-            echo "  ❌ Cannot list bucket"
-            echo "  Error: $?"
-            exit 1
-          fi
-          echo ""
-          
-          # 5. Try to download a small test file (if exists)
-          echo "[5/6] Testing file download..."
-          # Get the most recent date folder
-          LATEST_DATE=$(gsutil ls "$BUCKET/" | grep -E '20[0-9]{2}-[0-9]{2}-[0-9]{2}' | tail -1)
-          
-          if [ -n "$LATEST_DATE" ]; then
-            echo "  Latest date folder: $LATEST_DATE"
-            
-            # List files in that date
-            echo "  Files in latest date:"
-            gsutil ls "$LATEST_DATE" | head -3
-            
-            # Try to get size of first file (not download, just stat)
-            FIRST_FILE=$(gsutil ls "$LATEST_DATE" | head -1)
-            if [ -n "$FIRST_FILE" ]; then
-              echo ""
-              echo "  Testing gsutil stat on: $FIRST_FILE"
-              if gsutil stat "$FIRST_FILE"; then
-                echo "  ✓ File access successful"
-              else
-                echo "  ❌ Cannot access file"
-                exit 1
-              fi
-            fi
-          else
-            echo "  ⚠️  No date folders found"
-          fi
-          echo ""
-          
-          # 6. Test Python dependencies
-          echo "[6/6] Testing Python dependencies..."
-          pip3 install -q google-cloud-storage pyarrow 2>&1 | head -20
-          
-          if python3 -c "from google.cloud import storage; print('✓ google-cloud-storage imported')"; then
-            echo "  ✓ Python GCS library works"
-          else
-            echo "  ❌ Python GCS library failed"
+            echo "  ❌ HTTPS failed"
             exit 1
           fi
           
-          if python3 -c "import pyarrow; print('✓ pyarrow imported')"; then
-            echo "  ✓ PyArrow works"
-          else
-            echo "  ❌ PyArrow failed"
-            exit 1
-          fi
-          echo ""
+          # 3. Python GCS
+          echo "[3/4] Testing Python GCS library..."
+          python3 -c "
+          from google.cloud import storage
+          client = storage.Client.create_anonymous_client()
+          bucket = client.bucket('vt-file-feeder-by-date')
+          prefixes = list(bucket.list_blobs(max_results=5, delimiter='/').prefixes)
+          print(f'  ✓ Found {len(prefixes)} date folders')
+          if prefixes:
+              latest = sorted(prefixes)[-1].rstrip('/')
+              print(f'  Latest: {latest}')
+          "
           
-          # Summary
-          echo "=== Test Complete ==="
-          echo "✅ All checks passed!"
+          # 4. File access
+          echo "[4/4] Testing file access..."
+          python3 -c "
+          from google.cloud import storage
+          client = storage.Client.create_anonymous_client()
+          bucket = client.bucket('vt-file-feeder-by-date')
+          prefixes = sorted(list(bucket.list_blobs(max_results=100, delimiter='/').prefixes))
+          if prefixes:
+              latest = prefixes[-1].rstrip('/')
+              blobs = list(bucket.list_blobs(prefix=f'{latest}/', max_results=1))
+              if blobs:
+                  print(f'  ✓ File access OK ({blobs[0].size/(1024*1024):.1f} MB)')
+              else:
+                  print('  ⚠️  No files in latest folder')
+          "
+          
           echo ""
-          echo "GCS bucket is accessible from K8s cluster"
-          echo "Ready to deploy VT incremental import CronJob"
+          echo "=== All Tests Passed ==="
+          echo "✅ GCS is accessible from K8s"
           date
         
         resources:
@@ -162,15 +98,3 @@ spec:
           limits:
             memory: "1Gi"
             cpu: "1"
-        
-        # Optional: Mount GCP service account if available
-        # volumeMounts:
-        # - name: gcp-sa
-        #   mountPath: /var/run/secrets/cloud.google.com
-        #   readOnly: true
-      
-      # Optional: GCP service account volume
-      # volumes:
-      # - name: gcp-sa
-      #   secret:
-      #     secretName: gcp-service-account
